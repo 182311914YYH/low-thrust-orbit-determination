@@ -1,0 +1,25 @@
+function y = radar_observation_model(state, r_station)
+% 雷达观测方程：惯性系状态 -> 距离/方位角/俯仰角
+% 输入：
+%   state     : 6×1 航天器惯性系状态 [r; v]
+%   r_station : 3×1 测站惯性系位置
+% 输出：
+%   y         : 3×1 观测值 [距离rho(km), 方位角az(rad), 俯仰角el(rad)]
+
+    r_sat = state(1:3);
+    rho_vec = r_sat - r_station;
+    
+    % 斜距
+    rho = norm(rho_vec);
+    
+    % 方位角（x轴起算，顺时针，范围0~2π）
+    az = atan2(rho_vec(2), rho_vec(1));
+    if az < 0
+        az = az + 2*pi;
+    end
+    
+    % 俯仰角
+    el = asin(rho_vec(3) / rho);
+    
+    y = [rho; az; el];
+end
