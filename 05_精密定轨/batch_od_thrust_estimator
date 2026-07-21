@@ -1,0 +1,58 @@
+function [X_hat, residuals, iter_num, converged] = batch_od_thrust_estimator(...
+    X0_guess, t_obs, y_obs, r_station, R, max_iter, conv_thresh, prop_func)
+% 批处理加权最小二乘精密定轨与沿迹小推力估计主程序
+% 待估参数：7维向量 = [3维初始位置; 3维初始速度; 1维沿迹常值加速度]
+% 输入：
+%   X0_guess    : 7×1  参数初始猜测值 [r0(km); v0(km/s); at(km/s^2)]
+%   t_obs       : N×1  观测时刻序列 (s)
+%   y_obs       : N×3  观测值矩阵，列对应[距离(km), 方位角(rad), 俯仰角(rad)]
+%   r_station   : 3×1  测站地心惯性系位置 (km)
+%   R           : 3×3  观测噪声协方差矩阵
+%   max_iter    : 最大迭代次数
+%   conv_thresh : 收敛阈值（参数修正量的2范数）
+%   prop_func   : 轨道传播函数句柄（联调时替换为第二组接口）
+% 输出：
+%   X_hat       : 7×1  估计得到的参数
+%   residuals   : N×3  最终观测残差
+%   iter_num    : 实际迭代次数
+%   converged   : 布尔值，迭代是否收敛
+
+    % 初始化
+    X_curr = X0_guess;
+    converged = false;
+    iter_num = 0;
+    n_obs = length(t_obs);
+    
+    % 构造块对角权重矩阵 W = blkdiag(R^-1, R^-1, ...)
+    W = kron(eye(n_obs), inv(R));
+    
+    % 迭代主循环
+    while iter_num < max_iter
+        iter_num = iter_num + 1;
+        
+        % 步骤1：计算当前参数对应的观测值与残差
+        y_calc = compute_all_observations(X_curr, t_obs, r_station, prop_func);
+        residuals = y_obs - y_calc;
+        res_vec = residuals(:); % 展平为列向量
+        
+        % 步骤2：数值差分计算设计矩阵 H
+        H = numerical_design_matrix(X_curr, t_obs, r_station, prop_func);
+        
+        % 步骤3：加权最小二乘求解参数修正量
+        dx = wls_solve(res_vec, H, W);
+        
+        % 步骤4：更新待估参数
+        X_curr = X_curr + dx;
+        
+        % 步骤5：收敛判断
+        converged = check_convergence(dx, conv_thresh);
+        if converged
+            break;
+        end
+    end
+    
+    % 输出最终结果
+    X_hat = X_curr;
+    y_calc_final = compute_all_observations(X_hat, t_obs, r_station, prop_func);
+    residuals = y_obs - y_calc_final;
+end
