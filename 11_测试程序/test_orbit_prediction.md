@@ -1,120 +1,222 @@
+% 轨道预报、RTN误差、RMS和最大误差计算测试脚本
+% 成员4负责：轨道预报、RTN误差、RMS和最大误差计算
+% 统一使用 m、m/s、m/s^2 单位
+
 clear; clc; close all;
 
-%% 1. 基础参数配置
-mu = 398600.4418;
-a = 7000;
-r0_true = [a; 0; 0];
-v0_true = [0; sqrt(mu/a); 0];
-at_true = 1e-5;
-X_true = [r0_true; v0_true; at_true];
+%% 1. 加载配置与数据
+cfg = default_config();
+if ~isfield(cfg.estimation, 'maxDampingTrials')
+    cfg.estimation.maxDampingTrials = 6;
+    cfg.estimation.maxNormalizedStep = 2.0;
+end
+if ~isfield(cfg.prediction, 'outputStep')
+    cfg.prediction.outputStep = 60;
+end
 
-t_final = 3600;
+[data, t_obs, y_obs, t_reference, t_od_end] = generate_observation_data(cfg);
 
-prop_func = @propagate_orbit_j2_thrust;
+%% 2. 先执行完整定轨，获取估计参数
+X0_guess = [
+    cfg.estimation.x0Guess(:);
+    cfg.thrust.estimate.initialGuessRTN(2)
+];
 
-%% 2. 生成带偏差的估计参数（模拟定轨结果）
-r0_est = r0_true + [0.1; 0.08; 0.05];
-v0_est = v0_true + [0.001; 0.0008; 0.0005];
-at_est = at_true * 0.95;
-X_est = [r0_est; v0_est; at_est];
+fprintf('\n========== 执行完整定轨 ==========\n');
+[X_hat, ~, ~, ~, ~] = batch_od_thrust_estimator( ...
+    X0_guess, t_reference, t_obs, y_obs, cfg);
 
-%% 3. 12小时轨道预报
-fprintf('========== 12小时轨道预报测试 ==========\n');
-[t_pred_12h, state_pred_12h] = orbit_prediction(X_est, t_final, '12h', prop_func);
-[t_true_12h, state_true_12h] = orbit_prediction(X_true, t_final, '12h', prop_func);
+fprintf('\n定轨完成，估计沿迹加速度：%.6e m/s^2\n', X_hat(7));
 
-[err_rtn_12h, err_inertial_12h] = rtn_error(state_pred_12h, state_true_12h);
-stats_12h = error_statistics(err_rtn_12h, t_pred_12h);
+%% 3. 12h 和 24h 轨道预报与误差评价
+prediction = evaluate_predictions(X_hat, t_reference, t_od_end, data, cfg);
+print_prediction_summary(prediction);
 
-fprintf('预报时长：%.1f 小时\n', stats_12h.Duration_h);
-fprintf('R方向误差 RMS：%.4f km，Max：%.4f km\n', stats_12h.R_RMS, stats_12h.R_Max);
-fprintf('T方向误差 RMS：%.4f km，Max：%.4f km\n', stats_12h.T_RMS, stats_12h.T_Max);
-fprintf('N方向误差 RMS：%.4f km，Max：%.4f km\n', stats_12h.N_RMS, stats_12h.N_Max);
-fprintf('综合误差 RMS：%.4f km，Max：%.4f km\n\n', stats_12h.Overall_RMS, stats_12h.Overall_Max);
+%% 4. 绘图（共5张）
 
-%% 4. 24小时轨道预报
-fprintf('========== 24小时轨道预报测试 ==========\n');
-[t_pred_24h, state_pred_24h] = orbit_prediction(X_est, t_final, '24h', prop_func);
-[t_true_24h, state_true_24h] = orbit_prediction(X_true, t_final, '24h', prop_func);
+% --- 图1：12小时预报RTN误差 ---
+if isfield(prediction, 'h12')
+    item = prediction.h12;
+    figure('Name','12小时预报RTN误差','Color','w');
+    subplot(3,1,1);
+    plot(item.time_from_prediction_start/3600, item.position_error_rtn(:,1), 'LineWidth',1.1);
+    ylabel('R方向误差 (m)'); grid on; title('12小时预报RTN误差');
+    subplot(3,1,2);
+    plot(item.time_from_prediction_start/3600, item.position_error_rtn(:,2), 'LineWidth',1.1);
+    ylabel('T方向误差 (m)'); grid on;
+    subplot(3,1,3);
+    plot(item.time_from_prediction_start/3600, item.position_error_rtn(:,3), 'LineWidth',1.1);
+    ylabel('N方向误差 (m)'); xlabel('预报时长 (h)'); grid on;
+end
 
-[err_rtn_24h, err_inertial_24h] = rtn_error(state_pred_24h, state_true_24h);
-stats_24h = error_statistics(err_rtn_24h, t_pred_24h);
+% --- 图2：24小时预报RTN误差 ---
+if isfield(prediction, 'h24')
+    item = prediction.h24;
+    figure('Name','24小时预报RTN误差','Color','w');
+    subplot(3,1,1);
+    plot(item.time_from_prediction_start/3600, item.position_error_rtn(:,1), 'LineWidth',1.1);
+    ylabel('R方向误差 (m)'); grid on; title('24小时预报RTN误差');
+    subplot(3,1,2);
+    plot(item.time_from_prediction_start/3600, item.position_error_rtn(:,2), 'LineWidth',1.1);
+    ylabel('T方向误差 (m)'); grid on;
+    subplot(3,1,3);
+    plot(item.time_from_prediction_start/3600, item.position_error_rtn(:,3), 'LineWidth',1.1);
+    ylabel('N方向误差 (m)'); xlabel('预报时长 (h)'); grid on;
+end
 
-fprintf('预报时长：%.1f 小时\n', stats_24h.Duration_h);
-fprintf('R方向误差 RMS：%.4f km，Max：%.4f km\n', stats_24h.R_RMS, stats_24h.R_Max);
-fprintf('T方向误差 RMS：%.4f km，Max：%.4f km\n', stats_24h.T_RMS, stats_24h.T_Max);
-fprintf('N方向误差 RMS：%.4f km，Max：%.4f km\n', stats_24h.N_RMS, stats_24h.N_Max);
-fprintf('综合误差 RMS：%.4f km，Max：%.4f km\n\n', stats_24h.Overall_RMS, stats_24h.Overall_Max);
+% --- 图3：RTN误差对比（12h vs 24h） ---
+if isfield(prediction, 'h12') && isfield(prediction, 'h24')
+    p12 = prediction.h12;
+    p24 = prediction.h24;
+    figure('Name','RTN误差对比（12h vs 24h）','Color','w');
+    subplot(3,1,1);
+    plot(p12.time_from_prediction_start/3600, p12.position_error_rtn(:,1), 'b-', 'LineWidth',1.1); hold on;
+    plot(p24.time_from_prediction_start/3600, p24.position_error_rtn(:,1), 'r--', 'LineWidth',1.1);
+    ylabel('R方向误差 (m)'); legend('12h','24h'); grid on; title('RTN误差对比');
+    subplot(3,1,2);
+    plot(p12.time_from_prediction_start/3600, p12.position_error_rtn(:,2), 'b-', 'LineWidth',1.1); hold on;
+    plot(p24.time_from_prediction_start/3600, p24.position_error_rtn(:,2), 'r--', 'LineWidth',1.1);
+    ylabel('T方向误差 (m)'); grid on;
+    subplot(3,1,3);
+    plot(p12.time_from_prediction_start/3600, p12.position_error_rtn(:,3), 'b-', 'LineWidth',1.1); hold on;
+    plot(p24.time_from_prediction_start/3600, p24.position_error_rtn(:,3), 'r--', 'LineWidth',1.1);
+    ylabel('N方向误差 (m)'); xlabel('预报时长 (h)'); grid on;
+end
 
-%% 5. 验证模块接口
-fprintf('========== 模块接口验证 ==========\n');
-fprintf('orbit_prediction 输出维度：\n');
-fprintf('  t_pred: %d × %d\n', size(t_pred_24h, 1), size(t_pred_24h, 2));
-fprintf('  state_pred: %d × %d\n', size(state_pred_24h, 1), size(state_pred_24h, 2));
+% --- 图4：24小时惯性系位置误差 ---
+if isfield(prediction, 'h24')
+    item = prediction.h24;
+    figure('Name','24小时惯性系位置误差','Color','w');
+    subplot(3,1,1);
+    plot(item.time_from_prediction_start/3600, item.position_error_eci(:,1), 'LineWidth',1.1);
+    ylabel('x方向误差 (m)'); grid on; title('24小时惯性系位置误差');
+    subplot(3,1,2);
+    plot(item.time_from_prediction_start/3600, item.position_error_eci(:,2), 'LineWidth',1.1);
+    ylabel('y方向误差 (m)'); grid on;
+    subplot(3,1,3);
+    plot(item.time_from_prediction_start/3600, item.position_error_eci(:,3), 'LineWidth',1.1);
+    ylabel('z方向误差 (m)'); xlabel('预报时长 (h)'); grid on;
+end
 
-fprintf('rtn_error 输出维度：\n');
-fprintf('  err_rtn: %d × %d\n', size(err_rtn_24h, 1), size(err_rtn_24h, 2));
-fprintf('  err_inertial: %d × %d\n', size(err_inertial_24h, 1), size(err_inertial_24h, 2));
+% --- 图5：位置误差RMS增长趋势 ---
+fields = fieldnames(prediction);
+figure('Name','位置误差RMS增长趋势','Color','w');
+hold on;
+colors = lines(numel(fields));
+for i = 1:numel(fields)
+    item = prediction.(fields{i});
+    hours = item.horizon_seconds / 3600;
+    n = size(item.position_error_eci, 1);
+    trend = zeros(n, 1);
+    for k = 1:n
+        trend(k) = rms(item.position_error_eci(1:k,:), 'all');
+    end
+    plot(item.time_from_prediction_start/3600, trend, '-', ...
+        'Color', colors(i,:), 'LineWidth', 1.2, ...
+        'DisplayName', sprintf('%dh', hours));
+end
+xlabel('预报时长 (h)'); ylabel('累积位置误差 RMS (m)');
+legend('Location','best'); grid on; title('位置误差RMS增长趋势');
 
-fprintf('error_statistics 输出字段：\n');
-fields = fieldnames(stats_24h);
-for i = 1:length(fields)
-    fprintf('  %s: ', fields{i});
-    val = stats_24h.(fields{i});
-    if isscalar(val)
-        fprintf('%.6f\n', val);
-    else
-        fprintf('向量 (%d×1)\n', length(val));
+fprintf('\n========== 成员4任务完成 ==========\n');
+
+%% ========================================================================子函数
+function prediction = evaluate_predictions(X_hat, t_reference, t_od_end, data, cfg)
+    prediction = struct();
+
+    for i = 1:numel(cfg.prediction.horizons)
+        horizon = cfg.prediction.horizons(i);
+        end_time = t_od_end + horizon;
+
+        if end_time > data.t(end)
+            warning('真值数据不足以验证%.1f小时预报，跳过。', horizon/3600);
+            continue;
+        end
+
+        t_pred = (t_od_end:cfg.prediction.outputStep:end_time)';
+        if t_pred(end) < end_time
+            t_pred = [t_pred; end_time];
+        end
+
+        state_est_6xN = propagate_orbit_j2_thrust( ...
+            t_reference, X_hat(1:6), X_hat(7), t_pred, cfg);
+        state_est = state_est_6xN';
+
+        state_truth = interp1(data.t, data.state, t_pred, 'pchip');
+
+        position_error_eci = state_est(:,1:3) - state_truth(:,1:3);
+        velocity_error_eci = state_est(:,4:6) - state_truth(:,4:6);
+        position_error_rtn = rtn_position_error( ...
+            state_truth(:,1:3), state_truth(:,4:6), position_error_eci);
+
+        metric = struct();
+        metric.horizon_seconds = horizon;
+        metric.t = t_pred;
+        metric.time_from_prediction_start = t_pred - t_od_end;
+        metric.state_estimated = state_est;
+        metric.state_truth = state_truth;
+        metric.position_error_eci = position_error_eci;
+        metric.velocity_error_eci = velocity_error_eci;
+        metric.position_error_rtn = position_error_rtn;
+
+        metric.position_rms_eci = sqrt(mean(sum(position_error_eci.^2,2)));
+        metric.position_max_eci = max(vecnorm(position_error_eci,2,2));
+        metric.velocity_rms_eci = sqrt(mean(sum(velocity_error_eci.^2,2)));
+        metric.velocity_max_eci = max(vecnorm(velocity_error_eci,2,2));
+        metric.rtn_component_rms = sqrt(mean(position_error_rtn.^2,1));
+        metric.rtn_component_max = max(abs(position_error_rtn),[],1);
+        metric.endpoint_position_error_eci = norm(position_error_eci(end,:));
+        metric.endpoint_velocity_error_eci = norm(velocity_error_eci(end,:));
+        metric.endpoint_position_error_rtn = position_error_rtn(end,:);
+
+        field_name = sprintf('h%d', round(horizon/3600));
+        prediction.(field_name) = metric;
     end
 end
 
-%% 6. 结果图
+function error_rtn = rtn_position_error(r_truth, v_truth, error_eci)
+    N = size(r_truth,1);
+    error_rtn = zeros(N,3);
 
-figure('Name','12小时预报RTN误差');
-subplot(3,1,1);
-plot((t_pred_12h - t_final)/3600, err_rtn_12h(1,:), 'LineWidth',1);
-ylabel('R方向误差 (km)'); grid on; title('12小时预报RTN误差');
-subplot(3,1,2);
-plot((t_pred_12h - t_final)/3600, err_rtn_12h(2,:), 'LineWidth',1);
-ylabel('T方向误差 (km)'); grid on;
-subplot(3,1,3);
-plot((t_pred_12h - t_final)/3600, err_rtn_12h(3,:), 'LineWidth',1);
-ylabel('N方向误差 (km)'); xlabel('预报时长 (h)'); grid on;
+    for i = 1:N
+        r = r_truth(i,:)';
+        v = v_truth(i,:)';
 
-figure('Name','24小时预报RTN误差');
-subplot(3,1,1);
-plot((t_pred_24h - t_final)/3600, err_rtn_24h(1,:), 'LineWidth',1);
-ylabel('R方向误差 (km)'); grid on; title('24小时预报RTN误差');
-subplot(3,1,2);
-plot((t_pred_24h - t_final)/3600, err_rtn_24h(2,:), 'LineWidth',1);
-ylabel('T方向误差 (km)'); grid on;
-subplot(3,1,3);
-plot((t_pred_24h - t_final)/3600, err_rtn_24h(3,:), 'LineWidth',1);
-ylabel('N方向误差 (km)'); xlabel('预报时长 (h)'); grid on;
+        R_hat = r / norm(r);
+        h = cross(r,v);
+        N_hat = h / norm(h);
+        T_hat = cross(N_hat,R_hat);
+        T_hat = T_hat / norm(T_hat);
 
-figure('Name','RTN误差对比（12h vs 24h）');
-subplot(3,1,1);
-plot((t_pred_12h - t_final)/3600, err_rtn_12h(1,:), 'b-', 'LineWidth',1); hold on;
-plot((t_pred_24h - t_final)/3600, err_rtn_24h(1,:), 'r--', 'LineWidth',1);
-ylabel('R方向误差 (km)'); legend('12h','24h'); grid on; title('RTN误差对比');
-subplot(3,1,2);
-plot((t_pred_12h - t_final)/3600, err_rtn_12h(2,:), 'b-', 'LineWidth',1); hold on;
-plot((t_pred_24h - t_final)/3600, err_rtn_24h(2,:), 'r--', 'LineWidth',1);
-ylabel('T方向误差 (km)'); grid on;
-subplot(3,1,3);
-plot((t_pred_12h - t_final)/3600, err_rtn_12h(3,:), 'b-', 'LineWidth',1); hold on;
-plot((t_pred_24h - t_final)/3600, err_rtn_24h(3,:), 'r--', 'LineWidth',1);
-ylabel('N方向误差 (km)'); xlabel('预报时长 (h)'); grid on;
+        C_rtn_to_eci = [R_hat, T_hat, N_hat];
+        error_rtn(i,:) = (C_rtn_to_eci' * error_eci(i,:)')';
+    end
+end
 
-figure('Name','惯性系位置误差');
-subplot(3,1,1);
-plot((t_pred_24h - t_final)/3600, err_inertial_24h(1,:), 'LineWidth',1);
-ylabel('x方向误差 (km)'); grid on; title('24小时惯性系位置误差');
-subplot(3,1,2);
-plot((t_pred_24h - t_final)/3600, err_inertial_24h(2,:), 'LineWidth',1);
-ylabel('y方向误差 (km)'); grid on;
-subplot(3,1,3);
-plot((t_pred_24h - t_final)/3600, err_inertial_24h(3,:), 'LineWidth',1);
-ylabel('z方向误差 (km)'); xlabel('预报时长 (h)'); grid on;
+function print_prediction_summary(prediction)
+    fprintf('\n====================== 预报结果 ======================\n');
+    fields = fieldnames(prediction);
 
-fprintf('\n========== 测试完成 ==========\n');
+    for i = 1:numel(fields)
+        item = prediction.(fields{i});
+        hours = item.horizon_seconds / 3600;
+
+        fprintf('\n--- %.0f小时预报 ---\n', hours);
+        fprintf('位置误差RMS：%.6f m\n', item.position_rms_eci);
+        fprintf('位置最大误差：%.6f m\n', item.position_max_eci);
+        fprintf('末端位置误差：%.6f m\n', item.endpoint_position_error_eci);
+        fprintf('速度误差RMS：%.9f m/s\n', item.velocity_rms_eci);
+        fprintf('RTN分量RMS [R,T,N]：[% .6f, % .6f, % .6f] m\n', ...
+            item.rtn_component_rms(1), ...
+            item.rtn_component_rms(2), ...
+            item.rtn_component_rms(3));
+        fprintf('RTN分量Max [R,T,N]：[% .6f, % .6f, % .6f] m\n', ...
+            item.rtn_component_max(1), ...
+            item.rtn_component_max(2), ...
+            item.rtn_component_max(3));
+        fprintf('末端RTN误差 [R,T,N]：[% .6f, % .6f, % .6f] m\n', ...
+            item.endpoint_position_error_rtn(1), ...
+            item.endpoint_position_error_rtn(2), ...
+            item.endpoint_position_error_rtn(3));
+    end
+end
