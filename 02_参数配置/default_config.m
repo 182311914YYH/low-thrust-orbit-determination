@@ -244,6 +244,10 @@ cfg.estimation.useSVD = true;
 cfg.estimation.rejectOutliers = false;
 cfg.estimation.outlierThresholdSigma = 4.0;
 
+% LM 阻尼内循环参数
+cfg.estimation.maxDampingTrials = 6;
+cfg.estimation.maxNormalizedStep = 2.0;
+
 % 数值差分步长
 cfg.estimation.fd.position = 1.0;           % m
 cfg.estimation.fd.velocity = 1e-3;          % m/s
@@ -276,6 +280,7 @@ cfg.prediction.useEstimatedFinalState = true;
 cfg.prediction.futureThrustModel = 'hold_last_segment';
 cfg.prediction.compareNoThrustBaseline = true;
 cfg.prediction.compareTruthThrust = true;
+cfg.prediction.outputStep = 60;
 
 %% 17. 评价指标
 cfg.evaluation.computeECIError = true;
