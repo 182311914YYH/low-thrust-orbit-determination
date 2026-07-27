@@ -1,0 +1,20 @@
+{
+  "download_id": "afbf162c-bc30-46e7-be68-daaf53c2fe94",
+  "download_time_utc": "2026-07-26T13:28:29.958292+00:00",
+  "source": "Space-Track",
+  "source_class": "gp_history",
+  "output_format": "json",
+  "start_date": "2026-07-15",
+  "end_date": "2026-07-22",
+  "norad_ids": [
+    45754,
+    45668,
+    45693,
+    45098,
+    48472
+  ],
+  "object_count": 5,
+  "record_count": 92,
+  "source_file": "12_数据与实验结果\\raw\\space_track\\gp_history\\gp_history_2026-07-15_2026-07-22_batch_001.json",
+  "sha256": "93491cfe5aa4d36f77025c03e4971a41a1896a5c4494b5557336d4e25461a4eb"
+}
