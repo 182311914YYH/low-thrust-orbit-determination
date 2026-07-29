@@ -1,0 +1,344 @@
+# ===========================================================================
+# Non-cooperative Spacecraft Continuous Low-Thrust OD & Intelligent Prediction
+# Unified Configuration File
+# ===========================================================================
+# This is the SINGLE configuration entry point for the Python version.
+# All modules read from this file; no hard-coded constants elsewhere.
+#
+# Conventions:
+#   Length: m | Velocity: m/s | Acceleration: m/s^2 | Time: s | Angle: rad
+#   Primary frame: J2000/ECI (GCRF)
+#   Ground station: ECEF (ITRF)
+#   Topocentric: ENU
+#   Orbital: RTN
+#
+# Baseline scenario:
+#   550 km near-circular orbit, 53 deg inclination, along-track continuous
+#   low-thrust, Wuhan single-station radar, 2-day OD arc, 12h/24h prediction.
+# ===========================================================================
+
+# ---- 0. Meta & Random Seed ----
+meta:
+  project_name: "Noncooperative Spacecraft Low-Thrust OD and Prediction"
+  version: "V2.0-Python-Migration"
+  owner: "Project Team"
+  created: "2026-07"
+  description: "MATLAB to Python equivalent migration baseline"
+
+random:
+  seed: 20260701
+
+# ---- 1. Units & Frame Conventions ----
+units:
+  length: "m"
+  velocity: "m/s"
+  acceleration: "m/s^2"
+  time: "s"
+  angle: "rad"
+
+frame:
+  propagation: "ECI_J2000"
+  earth_fixed: "ECEF"
+  local_topo: "ENU"
+  orbital: "RTN"
+
+# ---- 2. Earth & Environment Constants (WGS-84) ----
+const:
+  mu_earth: 3.986004418e+14
+  radius_earth: 6378137.0
+  flattening_earth: 0.0033528106647474805
+  omega_earth: 7.2921150e-5
+  J2: 1.08262668e-3
+  J3: -2.5324105e-6
+  J4: -1.6198976e-6
+  au: 149597870700.0
+  c_light: 299792458.0
+  mu_sun: 1.32712440018e+20
+  mu_moon: 4.902800066e+12
+
+# ---- 3. Time Settings ----
+time:
+  epoch_utc: "2026-07-01T00:00:00Z"
+
+sim:
+  truth_duration: 259200
+  prediction_duration: 86400
+  integration_step: 10
+  measurement_step: 10
+  abs_tol: 1.0e-10
+  rel_tol: 1.0e-10
+  integrator: "DOP853"
+
+# ---- 4. Baseline Orbit Initial State ----
+orbit:
+  altitude: 550000.0
+  a: 6928137.0
+  e: 0.001
+  i_deg: 53.0
+  raan_deg: 20.0
+  arg_perigee_deg: 0.0
+  true_anomaly_deg: 0.0
+
+# ---- 5. Truth Dynamics Model Switches ----
+model:
+  truth:
+    use_central_gravity: true
+    use_J2: false
+    use_drag: true
+    use_srp: true
+    use_third_body: true
+    use_thrust: true
+    gravity_order: 20
+
+  estimate:
+    use_central_gravity: true
+    use_J2: false
+    use_drag: true
+    use_srp: true
+    use_third_body: true
+    use_thrust: true
+    gravity_order: 20
+
+# ---- 6. Spacecraft Physical Parameters ----
+spacecraft:
+  mass: 260.0
+  area_drag: 4.0
+  Cd: 2.2
+  area_srp: 4.0
+  Cr: 1.3
+
+# ---- 7. Simplified Atmosphere (Exponential Model) ----
+atmosphere:
+  model: "exponential"
+  reference_altitude: 550000.0
+  reference_density: 2.0e-13
+  scale_height: 60000.0
+  rotate_with_earth: true
+
+# ---- 8. Continuous Low-Thrust Truth Model ----
+thrust:
+  truth:
+    enabled: true
+    frame: "RTN"
+    mode: "piecewise_constant"
+    direction: "along_track"
+    acceleration_rtn: [0.0, 5.0e-5, 0.0]
+    start_time: 0
+    stop_time: 345600
+    linear_rate_rtn: [0.0, 0.0, 0.0]
+    periodic_amplitude_rtn: [0.0, 0.0, 0.0]
+
+  estimate:
+    enabled: true
+    frame: "RTN"
+    model: "constant_along_track"
+    estimate_radial: false
+    estimate_along_track: true
+    estimate_normal: false
+    initial_guess_rtn: [0.0, 4.0e-5, 0.0]
+    lower_bound_rtn: [-1.0e-4, -2.0e-4, -1.0e-4]
+    upper_bound_rtn: [1.0e-4, 2.0e-4, 1.0e-4]
+
+# ---- 9. Radar Station: Wuhan ----
+station:
+  name: "Wuhan"
+  latitude_deg: 30.5
+  longitude_deg: 114.3
+  altitude: 39.3
+  min_elevation_deg: 10.0
+
+# ---- 10. Radar Observation Types & Noise ----
+measurement:
+  types: ["range", "azimuth", "elevation"]
+  use_range: true
+  use_azimuth: true
+  use_elevation: true
+  sigma_range: 50.0
+  sigma_azimuth_deg: 0.02
+  sigma_elevation_deg: 0.02
+  bias_range: 0.0
+  bias_azimuth: 0.0
+  bias_elevation: 0.0
+  outlier:
+    enabled: false
+    probability: 0.01
+    scale: 8.0
+  dropout:
+    enabled: false
+    probability: 0.05
+
+# ---- 11. Initial State Guess (OD initial value) ----
+estimation:
+  initial_position_error_eci: [1000.0, -800.0, 600.0]
+  initial_velocity_error_eci: [0.8, -0.5, 0.3]
+  method: "batch_weighted_least_squares"
+  max_iterations: 15
+  parameter_tolerance: 1.0e-4
+  cost_tolerance: 1.0e-3
+  use_levenberg_marquardt: true
+  initial_damping: 1.0e-3
+  damping_increase: 10.0
+  damping_decrease: 0.3
+  max_condition_number: 1.0e12
+  use_svd: true
+  reject_outliers: false
+  outlier_threshold_sigma: 4.0
+  max_damping_trials: 6
+  max_normalized_step: 2.0
+  fd:
+    position: 1.0
+    velocity: 1.0e-3
+    thrust: 1.0e-7
+    scheme: "central"
+  scale:
+    position: 1000000.0
+    velocity: 1000.0
+    thrust: 1.0e-5
+  od_arc_duration: 172800
+
+# ---- 12. Segmentation Estimation ----
+segmentation:
+  enabled: true
+  methods: ["none", "fixed_time", "fixed_arcs"]
+  fixed_time_windows: [43200, 86400, 129600]
+  fixed_arc_counts: [1, 2, 3]
+  minimum_measurements_per_segment: 30
+  minimum_segment_duration: 1200
+
+# ---- 13. Orbit Prediction Settings ----
+prediction:
+  use_estimated_final_state: true
+  future_thrust_model: "hold_last_segment"
+  compare_no_thrust_baseline: true
+  compare_truth_thrust: true
+  output_step: 60
+  horizons_hours: [12, 24]
+
+# ---- 14. Evaluation Metrics ----
+evaluation:
+  compute_eci_error: true
+  compute_rtn_error: true
+  compute_position_rms: true
+  compute_velocity_rms: true
+  compute_maximum_error: true
+  compute_thrust_error: true
+  compute_residual_statistics: true
+  compute_convergence_statistics: true
+  primary_metric: "position_RMS_24h"
+  success_thrust_relative_error: 0.05
+  success_improvement_ratio: 0.20
+
+# ---- 15. Monte Carlo & Robustness ----
+monte_carlo:
+  enabled: false
+  number_of_runs: 50
+
+robustness:
+  enable_model_mismatch: false
+  enable_measurement_bias: false
+  enable_dropout: false
+  enable_outliers: false
+  enable_thrust_direction_error: false
+
+# ---- 16. Output Settings ----
+output:
+  save_results: true
+  save_figures: true
+  figure_format: "png"
+  figure_dpi: 200
+  output_root: "12_数据与实验结果"
+  data_directory: "12_数据与实验结果/data"
+  figure_directory: "12_数据与实验结果/figures"
+  log_directory: "12_数据与实验结果/logs"
+
+# ---- 17. Plot Switches ----
+plot:
+  show_orbit_3d: true
+  show_visibility: true
+  show_residuals: true
+  show_rtn_errors: true
+  show_thrust_estimate: true
+  show_prediction_comparison: true
+
+# ---- 18. Data Interface Conventions ----
+interface:
+  state_order: ["x", "y", "z", "vx", "vy", "vz"]
+  measurement_order: ["range", "azimuth", "elevation"]
+  rtn_order: ["radial", "along_track", "normal"]
+
+# ---- 19. High-Precision Propagator Upgrade ----
+high_precision:
+  gravity_degree: 2
+  gravity_order: 2
+  drag:
+    model: "nrlmsise00"
+    Cd_estimation: true
+    Cd_scale_bounds: [0.5, 3.0]
+  srp:
+    enabled: true
+    Cr_estimation: false
+    shadow_model: "conical"
+  third_body:
+    sun: true
+    moon: true
+    jpl_ephemeris: "de432s"
+  empirical:
+    mode: "piecewise_constant"
+    segment_duration: 3600
+    bounds_rtn:
+      R: [-2.0e-5, 2.0e-5]
+      T: [-2.0e-5, 2.0e-5]
+      N: [-2.0e-5, 2.0e-5]
+
+# ---- 20. Informer Parameters (reserved) ----
+informer:
+  d_model: 128
+  n_heads: 8
+  n_encoder_layers: 3
+  ffn_dim: 256
+  dropout: 0.1
+  activation: "gelu"
+  history_length: 288
+  prediction_length_12h: 72
+  prediction_length_24h: 144
+
+# ---- 21. GNN Parameters (reserved) ----
+gnn:
+  type: "GATv2"
+  n_layers: 2
+  hidden_dim: 128
+  n_heads: 4
+  dropout: 0.1
+  k_neighbors: 4
+  num_nodes: 60
+
+# ---- 22. Training Parameters (reserved) ----
+training:
+  optimizer: "AdamW"
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  batch_size: 4
+  max_epochs: 100
+  early_stopping_patience: 15
+  gradient_clip: 1.0
+  mixed_precision: true
+  loss_weights:
+    lambda_acc: 1.0
+    lambda_state: 1.0
+    lambda_rtn: 1.0
+    lambda_endpoint: 0.5
+    lambda_smooth: 0.01
+    lambda_bound: 0.001
+    lambda_graph: 0.001
+
+# ---- 23. Data Paths (reuse existing pipeline output) ----
+data_paths:
+  raw_catalog: "数据收集与预处理/12_数据与实验结果/raw/space_track/catalog"
+  raw_history: "数据收集与预处理/12_数据与实验结果/raw/space_track/gp_history"
+  bronze: "数据收集与预处理/12_数据与实验结果/bronze/omm_history"
+  silver_states: "数据收集与预处理/12_数据与实验结果/silver/orbit_states"
+  gold_informer: "数据收集与预处理/12_数据与实验结果/gold/informer_samples"
+  gold_gnn: "数据收集与预处理/12_数据与实验结果/gold/gnn_samples"
+  gold_residual: "数据收集与预处理/12_数据与实验结果/gold/residual_acceleration"
+  gold_split: "数据收集与预处理/12_数据与实验结果/gold/dataset_split"
+  database: "数据收集与预处理/12_数据与实验结果/database/starlink.duckdb"
