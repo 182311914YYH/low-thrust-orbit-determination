@@ -1,8 +1,12 @@
-"""3 journal-quality figures for PINN+LSTM model evaluation.
+"""PINN+LSTM 模型评估 — 三张期刊标准图表.
 
-Fig1: SMA prediction (1 row x 2 col: timeseries + error hist)
-Fig2: Maneuver detection (2x2: ROC, confusion, R2 bars, sensitivity)
-Fig3: Radar POD with AI fusion (2x2: position err, thrust, RTN, residuals)
+物理模型: NRLMSISE-00 + EGM96x20 + SRP + 三体引力 (configs/default.yaml)
+AI模型:  LSTM编码器 + 双头(回归+分类) + 物理残差特征
+训练:    degree-2自洽仿真数据（数据生成器与物理模型一致）
+
+Fig1: SMA预报精度 — 真实QK-1 OEM + 高精度物理传播 + AI修正
+Fig2: 机动检测 — 仿真验证(degree-2自洽) + 物理残差特征
+Fig3: 雷达OD融合 — 真实QK-1轨道 + 高精度物理 + AI机动先验
 """
 import sys; sys.path.insert(0, '.')
 import numpy as np
@@ -28,20 +32,20 @@ plt.rcParams.update({
     'savefig.pad_inches': 0.08,
 })
 
-out = Path("12_数据与实验结果/reports"); out.mkdir(parents=True, exist_ok=True)
+out = Path("评估图表"); out.mkdir(parents=True, exist_ok=True)
 
-from config_.config_loader import load_config
-from fusion.train_pinn import load_qk1_dataset, find_continuous_segments, build_samples_from_segments
-from fusion.model_pinn import PINNLSTMModel
-from propagator.propagator import OrbitalPropagator
-from coordinates.frames import cart2kep, kep2cart, eci_to_ecef
-from coordinates.time_systems import gmst_from_jd_batch
+from 系统配置.config_loader import load_config
+from AI融合模型.train_pinn import load_qk1_dataset, find_continuous_segments, build_samples_from_segments
+from AI融合模型.model_pinn import PINNLSTMModel
+from 物理力模型.propagator import OrbitalPropagator
+from 坐标时间系统.frames import cart2kep, kep2cart, eci_to_ecef
+from 坐标时间系统.time_systems import gmst_from_jd_batch
 
-cfg = load_config("configs/default.yaml")
+cfg = load_config("系统配置/default.yaml")
 mu, Re = cfg["const"]["mu_earth"], cfg["const"]["radius_earth"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-data = load_qk1_dataset("cspace数据"); N_all = len(data)
+data = load_qk1_dataset("数据文件/QK1原始OEM数据"); N_all = len(data)
 nt = int(N_all * 0.15)
 train_data = data[:N_all - 2*nt]
 test_data = data[N_all - nt:]
@@ -69,6 +73,12 @@ class Detector(nn.Module):
 
 
 def load_or_train():
+    """训练或加载 AI 模型。
+
+    使用 degree-2 自洽仿真数据训练：数据生成器=物理模型=J2only，
+    保证物理残差特征纯净（R2>0.99）。推理时特征求取同样用degree-2，
+    但轨道传播用高精度cfg（fig1/fig3），AI修正叠加在高精度物理基线上。
+    """
     cache = out / "model_final.pt"
     if cache.exists():
         m = Detector()
@@ -76,7 +86,7 @@ def load_or_train():
         return m.to(device), 3e-5
 
     print("  训练 PINN+LSTM 模型...")
-    c2 = load_config("configs/default.yaml")
+    c2 = load_config("系统配置/default.yaml")
     c2["model"]["truth"]["gravity_order"] = 2
     c2["model"]["truth"]["use_J2"] = True
     c2["model"]["truth"]["use_srp"] = False
@@ -159,7 +169,8 @@ model.eval()
 
 # ---------- Build features for real QK-1 test set ----------
 def build_test_features(samples):
-    c2 = load_config("configs/default.yaml")
+    """构建物理残差特征 — 必须与训练时一致 (degree-2)"""
+    c2 = load_config("系统配置/default.yaml")
     c2["model"]["truth"]["gravity_order"] = 2
     c2["model"]["truth"]["use_J2"] = True
     c2["model"]["truth"]["use_srp"] = False
@@ -244,7 +255,7 @@ def figure1():
     ax_a.set_xlabel('预报时间 / h', fontsize=9)
     ax_a.set_ylabel('半长轴 / km', fontsize=9)
     ax_a.legend(loc='upper right', framealpha=0.85, fontsize=8)
-    ax_a.set_title(f'QK-1 {date_str}  预报推力幅值 {np.linalg.norm(da_b):.1e} m/s2',
+    ax_a.set_title(f'QK-1 {date_str}  模型预报 (NRLMSISE-00+EGM20+SRP+III)',
                    fontsize=10, loc='left')
 
     # (b) Error histogram
@@ -274,7 +285,7 @@ def figure2():
     from sklearn.metrics import (roc_curve, auc, precision_recall_curve,
                                  average_precision_score, confusion_matrix)
 
-    c2 = load_config("configs/default.yaml")
+    c2 = load_config("系统配置/default.yaml")
     c2["model"]["truth"]["gravity_order"] = 2
     c2["model"]["truth"]["use_J2"] = True
     c2["model"]["truth"]["use_srp"] = False

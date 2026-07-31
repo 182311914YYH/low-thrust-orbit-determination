@@ -1,0 +1,57 @@
+{
+  "description": "QK-1 real-orbit-anchored STK synthetic continuous-low-thrust dataset",
+  "initial_state": {
+    "epoch_utc": "2023-11-25T11:08:00Z",
+    "r_km": [
+      -2573.837655708,
+      -3401.903650748,
+      5290.367494348
+    ],
+    "v_km_s": [
+      -4.67634931111,
+      -3.81765332454,
+      -4.71065822797
+    ],
+    "frame": "J2000",
+    "source": "E:\\项目实习\\STK仿真数据获取\\QK_1_OEM_20231125030405_0001.dat"
+  },
+  "simulation_config": {
+    "scenario_name": "QK1_LowThrust_Data",
+    "output_dir": "qk1_stk_output",
+    "total_duration_s": 86400.0,
+    "sample_step_s": 60.0,
+    "burn_start_s": 10800.0,
+    "burn_duration_s": 3600.0,
+    "engine_mode": "acceleration",
+    "acceleration_mps2": 9e-05,
+    "thrust_n": 0.018,
+    "isp_s": 1500.0,
+    "total_mass_kg": 200.0,
+    "fuel_mass_kg": 1.0,
+    "cd": 2.2,
+    "cr": 1.2,
+    "drag_area_m2": 1.0,
+    "srp_area_m2": 1.0,
+    "output_frame": "J2000",
+    "propagator_name": "Earth HPOP Default v10",
+    "visible": true,
+    "attach": false
+  },
+  "engine_component": "QK1_Hall_ConstAcceleration",
+  "records": {
+    "no_thrust": 1441,
+    "with_thrust": 1441
+  },
+  "parameter_status": {
+    "18_mN": "公开报道的QK-1霍尔推力器在轨工作点",
+    "200_kg": "工程假设，非已确认官方质量",
+    "1500_s_Isp": "工程假设",
+    "Cd_Cr_area": "工程假设"
+  },
+  "label_definition": {
+    "truth_orbit": "STK Astrogator finite-maneuver trajectory",
+    "physics_baseline": "same initial state and propagator without maneuver",
+    "thrust_direction": "instantaneous inertial velocity vector",
+    "RTN_labels": "injected acceleration projected using truth r and v"
+  }
+}
