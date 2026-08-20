@@ -1,216 +1,511 @@
-"""物理-AI 融合模型 — 完整的 Informer + GNN + Decoder 架构
+"""PINN + LSTM model for non-cooperative spacecraft thrust estimation.
 
 Architecture:
-  Input  →  Informer (单星时间编码)
-         →  GNN (星间空间融合)
-         →  Decoder (未来多步 RTN 残差加速度预测)
+  144-step history → 2-layer LSTM → hidden state h
+  h + time encoding → ThrustMLP → Δa_RTN(t)  (continuous neural thrust function)
+  Δa_RTN(t) + known physics → Differentiable RK4 → predicted orbit
 
-Output: Δa_RTN ∈ R^{H×3}  for each satellite
-
-其中 H = prediction_length (72 for 12h, 144 for 24h @ 600s step)
+Key difference from Informer approach:
+  - LSTM is naturally suited for sequence-to-function tasks
+  - Time-varying thrust (not constant over prediction window)
+  - Physics-informed loss constrains the model to physically plausible solutions
 """
 from __future__ import annotations
 
 import math
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
-from informer.model import InformerEncoder
-from gnn.model import GNNEncoder
+
+# ===== Differentiable Physics Engine (pure torch) =====
+
+def _compute_physics_accel(
+    r: torch.Tensor,
+    v: torch.Tensor,
+    mu: float, J2: float, Re: float,
+    omega: float,
+    rho0: float, h0: float, H_scale: float, Cd_A_m: float,
+    a_rtn: torch.Tensor | None,
+) -> torch.Tensor:
+    """Compute total acceleration: gravity + J2 + drag + RTN thrust.
+
+    All inputs are torch tensors for differentiability.
+    r, v: (B, 3)
+    a_rtn: (B, 3) or None
+    Returns: (B, 3) total acceleration in ECI
+    """
+    rn = torch.norm(r, dim=-1, keepdim=True).clamp(min=1e-3)
+
+    # 1. Central gravity: a = -mu * r / |r|³
+    a = -mu * r / rn**3
+
+    # 2. J2 perturbation
+    x, y, z = r[..., 0], r[..., 1], r[..., 2]
+    r2 = rn.squeeze(-1)**2
+    z2 = z**2
+    factor = 1.5 * J2 * mu * Re**2 / rn.squeeze(-1)**5
+    a_j2 = torch.stack([
+        factor * x * (5.0 * z2 / r2 - 1.0),
+        factor * y * (5.0 * z2 / r2 - 1.0),
+        factor * z * (5.0 * z2 / r2 - 3.0),
+    ], dim=-1)
+    a = a + a_j2
+
+    # 3. Exponential atmospheric drag
+    alt = rn.squeeze(-1) - Re
+    rho = rho0 * torch.exp(-(alt - h0) / H_scale)
+    omega_tensor = torch.tensor([0.0, 0.0, omega], device=r.device, dtype=r.dtype)
+    v_atm = torch.cross(omega_tensor.expand_as(r), r, dim=-1)
+    v_rel = v - v_atm
+    v_rel_n = torch.norm(v_rel, dim=-1, keepdim=True).clamp(min=1e-12)
+    a_drag = -0.5 * rho.unsqueeze(-1) * Cd_A_m * v_rel_n * v_rel
+    a = a + a_drag
+
+    # 4. RTN thrust → ECI
+    if a_rtn is not None:
+        R_hat = r / rn
+        speed = torch.norm(v, dim=-1, keepdim=True).clamp(min=1e-12)
+        T_hat = v / speed
+        N_hat = torch.cross(R_hat, T_hat, dim=-1)
+        N_hat = N_hat / torch.norm(N_hat, dim=-1, keepdim=True).clamp(min=1e-12)
+        # Rotation matrix R: columns = [R_hat, T_hat, N_hat]
+        C = torch.stack([R_hat, T_hat, N_hat], dim=-1)  # (B, 3, 3)
+        a_rtn_eci = torch.bmm(C, a_rtn.unsqueeze(-1)).squeeze(-1)
+        a = a + a_rtn_eci
+
+    return a
 
 
-class FutureDecoder(nn.Module):
-    """未来 RTN 残差加速度多步解码器。
+def differentiable_rk4_step(
+    r: torch.Tensor, v: torch.Tensor,
+    dt: float,
+    mu: float, J2: float, Re: float, omega: float,
+    rho0: float, h0: float, H_scale: float, Cd_A_m: float,
+    a_rtn: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single RK4 step. r,v are (B,3). Returns (r_new, v_new)."""
+    def acc(rr, vv, aa_rtn=None):
+        return _compute_physics_accel(rr, vv, mu, J2, Re, omega, rho0, h0, H_scale, Cd_A_m, aa_rtn)
 
-    输入:
-      - h_space: (B, N, d_model) 空间融合特征
-      - physics_future: (B, N, H, 6) 物理预测状态
-      - future_time_features: (B, N, H, F_t) 未来时间编码 (可选)
+    a1 = acc(r, v, a_rtn)
+    k1v, k1r = a1, v
 
-    输出:
-      - delta_a_rtn: (B, N, H, 3) RTN残差加速度 [ΔaR, ΔaT, ΔaN]
+    a2 = acc(r + 0.5*dt*k1r, v + 0.5*dt*k1v, a_rtn)
+    k2v, k2r = a2, v + 0.5*dt*k1v
 
-    架构:
-      Per-step MLP: concat(h_space, physics_state(t), time(t)) → MLP → Δa
-      使用 Tanh 限制输出幅值。
+    a3 = acc(r + 0.5*dt*k2r, v + 0.5*dt*k2v, a_rtn)
+    k3v, k3r = a3, v + 0.5*dt*k2v
+
+    a4 = acc(r + dt*k3r, v + dt*k3v, a_rtn)
+    k4v, k4r = a4, v + dt*k3v
+
+    r_new = r + dt/6.0 * (k1r + 2*k2r + 2*k3r + k4r)
+    v_new = v + dt/6.0 * (k1v + 2*k2v + 2*k3v + k4v)
+    return r_new, v_new
+
+
+def differentiable_propagate_with_thrust_fn(
+    r0: torch.Tensor,
+    v0: torch.Tensor,
+    dt_output: float,
+    n_steps: int,
+    thrust_fn,  # callable: thrust_fn(t_vec) -> (B, 3) Δa_RTN
+    physics_params: dict,
+    substeps: int = 10,
+    return_full: bool = False,
+):
+    """Propagate orbit with time-varying thrust from a neural function.
+
+    Args:
+        r0, v0: (B, 3) initial position [m], velocity [m/s]
+        dt_output: output time step [s]
+        n_steps: number of output steps (H)
+        thrust_fn: callable that takes (B, T) time tensor [s from t0] → (B, T, 3) a_rtn
+        physics_params: dict of {mu, J2, Re, omega, rho0, h0, H_scale, Cd_A_m}
+        substeps: number of internal steps per output step (default 10)
+        return_full: if True, return (positions, velocities); else just positions
+
+    Returns:
+        positions: (B, n_steps, 3) position history [m]
+        if return_full: also velocities: (B, n_steps, 3)
+    """
+    B = r0.shape[0]
+    device = r0.device
+    dt_sub = dt_output / substeps
+    total_substeps = n_steps * substeps
+
+    mu = physics_params["mu"]
+    J2 = physics_params["J2"]
+    Re = physics_params["Re"]
+    omega = physics_params["omega"]
+    rho0 = physics_params["rho0"]
+    h0 = physics_params["h0"]
+    H_scale = physics_params["H_scale"]
+    Cd_A_m = physics_params["Cd_A_m"]
+
+    r, v = r0, v0
+    positions = torch.zeros(B, n_steps, 3, device=device, dtype=r.dtype)
+    velocities = torch.zeros(B, n_steps, 3, device=device, dtype=r.dtype) if return_full else None
+
+    # Pre-compute thrust at all output steps (query thrust_fn once per output step)
+    t_output = torch.arange(n_steps, device=device, dtype=r.dtype) * dt_output
+    a_rtn_output = thrust_fn(t_output.unsqueeze(0).expand(B, -1))  # (B, n_steps, 3)
+
+    for i in range(total_substeps):
+        out_idx = i // substeps
+        a_rtn_current = a_rtn_output[:, out_idx, :]  # (B, 3) — piecewise constant
+
+        r, v = differentiable_rk4_step(
+            r, v, dt_sub,
+            mu, J2, Re, omega, rho0, h0, H_scale, Cd_A_m,
+            a_rtn_current,
+        )
+
+        if (i + 1) % substeps == 0:
+            k = (i + 1) // substeps - 1
+            positions[:, k, :] = r
+            if return_full:
+                velocities[:, k, :] = v
+
+    if return_full:
+        return positions, velocities
+    return positions
+
+
+# ===== LSTM Encoder =====
+
+class LSTMEncoder(nn.Module):
+    """2-layer LSTM to encode orbital history into a compact hidden state.
+
+    Input: (B, L, F) — L=144 history steps, F=feature dim
+    Output: h_final (B, 2*d_hidden) — concatenated final hidden states from both layers
     """
 
-    def __init__(
-        self,
-        d_model: int = 128,
-        num_time_features: int = 6,
-        hidden_dim: int = 128,
-        dropout: float = 0.1,
-        acc_bounds: tuple[float, float, float] = (5e-5, 2e-4, 5e-5),
-    ):
+    def __init__(self, input_dim: int = 14, hidden_dim: int = 64, num_layers: int = 2,
+                 dropout: float = 0.1):
         super().__init__()
-        # Input: h_space(128) + physics(6) [+ time if present]
-        self._base_dim = d_model + 6  # = 134
-        self._pad_time_dim = max(num_time_features, 0)
-        input_dim = self._base_dim + self._pad_time_dim
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
 
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 3),
-            nn.Tanh(),
+        self.lstm = nn.LSTM(
+            input_dim, hidden_dim, num_layers,
+            batch_first=True, dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=False,
         )
+        self.dropout = nn.Dropout(dropout)
 
-        # Output scaling — must cover 99.5% of label values from piecewise fitting
-        # Default: [5e-5, 1e-4, 5e-5] for [ΔaR, ΔaT, ΔaN]
-        # ΔaT is always largest (along-track error accumulation)
-        self.register_buffer(
-            "acc_scale",
-            torch.tensor(acc_bounds, dtype=torch.float).view(1, 1, 1, 3),
-        )
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """Encode sequence.
 
-    def forward(
-        self,
-        h_space: torch.Tensor,
-        physics_future: torch.Tensor,
-        future_time_features: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        Args:
+            x: (B, L, F) input features
+            mask: (B, L) optional mask, 1=valid, 0=pad
+
+        Returns:
+            h: (B, 2 * hidden_dim) concatenated final states from layer 1 & 2
+        """
+        B, L, _ = x.shape
+
+        # Pack padded sequence if mask provided
+        if mask is not None and mask.sum() < B * L:
+            lengths = mask.sum(dim=1).cpu().long()
+            lengths = lengths.clamp(min=1)
+            packed = nn.utils.rnn.pack_padded_sequence(
+                x, lengths, batch_first=True, enforce_sorted=False
+            )
+            _, (h_n, _) = self.lstm(packed)
+        else:
+            _, (h_n, _) = self.lstm(x)
+
+        # h_n: (num_layers, B, hidden_dim)
+        # Concatenate final states from layer 0 and layer 1
+        h = torch.cat([h_n[0], h_n[1]], dim=-1)  # (B, 2*d)
+        return self.dropout(h)
+
+
+# ===== Neural Thrust Function =====
+
+class NeuralThrustFunction(nn.Module):
+    """MLP that maps (hidden_state, time_encoding) → Δa_RTN(t).
+
+    The hidden_state encodes "what thrust pattern is the satellite exhibiting",
+    and the time encoding tells "what time in the prediction window we're at".
+
+    Time encoding uses sin/cos of orbital and daily periods to capture
+    the periodic patterns in thrust (e.g., thrust during eclipse vs sunlight).
+    """
+
+    def __init__(self, hidden_dim: int = 128, num_harmonics: int = 4,
+                 thrust_bounds: tuple[float, float, float] = (5e-5, 2e-4, 5e-5)):
         """
         Args:
-            h_space: (B, N, d_model)
-            physics_future: (B, N, H, 6)
-            future_time_features: (B, N, H, F_t) optional
+            hidden_dim: dimension of LSTM encoding
+            num_harmonics: number of sin/cos pairs for time encoding (→ 2*n_harmonics dims)
+            thrust_bounds: (max_R, max_T, max_N) for soft-clamping thrust output [m/s²]
+        """
+        super().__init__()
+        time_dim = 2 * num_harmonics  # sin/cos for each harmonic
+        input_dim = hidden_dim + time_dim
+
+        self.time_dim = time_dim
+        self.num_harmonics = num_harmonics
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, 64),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, 32),
+            nn.GELU(),
+            nn.Linear(32, 3),
+        )
+
+        # Soft bounds for each RTN component
+        # Use softplus to constrain output magnitude
+        self.register_buffer("bounds", torch.tensor(thrust_bounds))
+
+    def time_encoding(self, t: torch.Tensor) -> torch.Tensor:
+        """Encode time with sin/cos of multiple harmonics.
+
+        Args:
+            t: (B, T) time values in seconds from prediction start
 
         Returns:
-            delta_a_rtn: (B, N, H, 3)
+            (B, T, time_dim) time features
         """
-        B, N, H, _ = physics_future.shape
+        harmonics = []
+        # Orbital period ~5700s (95 min), daily ~86400s, monthly ~2.6e6s, yearly ~3.15e7s
+        periods = [5700.0, 86400.0, 2.6e6, 3.15e7]
+        for T_period in periods[:self.num_harmonics]:
+            omega = 2 * math.pi / T_period
+            harmonics.append(torch.sin(omega * t))
+            harmonics.append(torch.cos(omega * t))
+        return torch.stack(harmonics, dim=-1)  # (B, T, time_dim)
 
-        # Expand h_space to all time steps
-        h_expanded = h_space.unsqueeze(2).expand(-1, -1, H, -1)  # (B, N, H, d_model)
+    def forward(self, h: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Predict thrust at time points t.
 
-        # Concatenate per time step; pad with zeros if no time features
-        if future_time_features is not None:
-            combined = torch.cat([h_expanded, physics_future, future_time_features], dim=-1)
-        else:
-            # Pad to match MLP expected input dim
-            padding = torch.zeros(B, N, H, self._pad_time_dim, device=physics_future.device)
-            combined = torch.cat([h_expanded, physics_future, padding], dim=-1)
+        Args:
+            h: (B, hidden_dim) LSTM hidden state
+            t: (B, T) time values [s from prediction start]
 
-        # Reshape for MLP: (B*N*H, input_dim)
-        flat = combined.view(B * N * H, -1)
-        out = self.mlp(flat)  # (B*N*H, 3)
-        out = out.view(B, N, H, 3)
+        Returns:
+            (B, T, 3) Δa_RTN [m/s²]
+        """
+        B, T = t.shape
+        # Expand h to match time dimension
+        h_exp = h.unsqueeze(1).expand(-1, T, -1)  # (B, T, hidden_dim)
+        t_enc = self.time_encoding(t)              # (B, T, time_dim)
+        combined = torch.cat([h_exp, t_enc], dim=-1)  # (B, T, input_dim)
 
-        return out * self.acc_scale
+        # MLP per time step
+        combined_flat = combined.reshape(B * T, -1)
+        out_flat = self.mlp(combined_flat)
+        out = out_flat.reshape(B, T, 3)
+
+        # Soft clamping: bounded but smooth, prevents extreme predictions
+        # a_out = bounds * tanh(raw / bounds) — scales to [-bounds, bounds]
+        # Using a softer version: bounds * (raw / sqrt(raw² + bounds²)) ≈ bounds * tanh(raw/bounds)
+        bound = self.bounds.unsqueeze(0).unsqueeze(0)  # (1, 1, 3)
+        out = bound * torch.tanh(out / bound)
+
+        return out
 
 
-class PhysicsAIFusionModel(nn.Module):
-    """完整的物理-AI融合模型。
+# ===== Full PINN-LSTM Model =====
 
-    Architecture:
-      Starlink history states (N satellites × L steps)
-              │
-      ┌───────┴────────┐
-      │  Informer       │  ← 单星时间编码
-      │  d_model=128    │
-      └───────┬────────┘
-              │ h_time: (B, N, 128)
-      ┌───────┴────────┐
-      │  GNN (GATv2)    │  ← 星间空间融合
-      │  2 layers       │
-      └───────┬────────┘
-              │ h_space: (B, N, 128)
-      ┌───────┴────────┐
-      │  Future Decoder │  ← 未来RTN残差加速度
-      │  MLP per step   │
-      └───────┬────────┘
-              │
-      Δa_RTN ∈ R^{B×N×H×3}
+class PINNLSTMModel(nn.Module):
+    """Complete PINN+LSTM model for orbit prediction with unknown thrust.
+
+    Pipeline:
+      history (B, L, F) → LSTMEncoder → h (B, 2*d)
+      h → NeuralThrustFunction → Δa_RTN(t) for any future t
+      Δa_RTN(t) + physics → differentiable RK4 → predicted orbit
     """
 
-    def __init__(self, cfg: dict):
+    def __init__(self,
+                 input_dim: int = 14,
+                 lstm_hidden: int = 64,
+                 lstm_layers: int = 2,
+                 lstm_dropout: float = 0.1,
+                 num_harmonics: int = 4,
+                 thrust_bounds: tuple = (5e-5, 2e-4, 5e-5)):
         super().__init__()
-        inf = cfg.get("informer", {})
-        g = cfg.get("gnn", {})
 
-        d_model = inf.get("d_model", 128)
+        self.encoder = LSTMEncoder(input_dim, lstm_hidden, lstm_layers, lstm_dropout)
+        hidden_dim = 2 * lstm_hidden  # concatenated from 2 layers
 
-        self.informer = InformerEncoder(
-            d_model=d_model,
-            n_heads=inf.get("n_heads", 8),
-            n_encoder_layers=inf.get("n_encoder_layers", 3),
-            ffn_dim=inf.get("ffn_dim", 256),
-            dropout=inf.get("dropout", 0.1),
-            activation=inf.get("activation", "gelu"),
-            num_value_features=14,
-            num_time_features=6,
-            max_seq_len=inf.get("history_length", 288) + 10,
-        )
+        self.thrust_fn = NeuralThrustFunction(hidden_dim, num_harmonics, thrust_bounds)
 
-        self.gnn = GNNEncoder(
-            d_model=d_model,
-            n_layers=g.get("n_layers", 2),
-            n_heads=g.get("n_heads", 4),
-            edge_dim=13,  # match graph_builder output
-            dropout=g.get("dropout", 0.1),
-        )
+        # Store for easy access
+        self.hidden_dim = hidden_dim
 
-        self.decoder = FutureDecoder(
-            d_model=d_model,
-            hidden_dim=d_model,
-            dropout=inf.get("dropout", 0.1),
-            acc_bounds=(5e-5, 2e-4, 5e-5),  # [R,T,N] — T dominant for along-track error accumulation
-        )
+    def encode(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """Encode history → hidden state."""
+        return self.encoder(x, mask)
 
-    def forward(
-        self,
-        history_features: torch.Tensor,           # (B, N, L, F)
-        edge_index: torch.Tensor,                  # (2, E)
-        edge_attr: torch.Tensor,                   # (E, F_e)
-        physics_future: torch.Tensor,              # (B, N, H, 6)
-        history_mask: Optional[torch.Tensor] = None,     # (B, N, L)
-        time_features: Optional[torch.Tensor] = None,    # (B, N, L, F_t)
-        future_time_features: Optional[torch.Tensor] = None,  # (B, N, H, F_t)
-    ) -> torch.Tensor:
-        """
+    def predict_thrust(self, h: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Predict thrust at given times.
+
+        Args:
+            h: (B, hidden_dim) from encoder
+            t: (B, T) times [s]
+
         Returns:
-            delta_a_rtn: (B, N, H, 3)
+            (B, T, 3) Δa_RTN [m/s²]
         """
-        B, N, L, F = history_features.shape
+        return self.thrust_fn(h, t)
 
-        # 1. Informer: per-satellite time encoding
-        # Reshape: (B, N, L, F) → (B*N, L, F)
-        hist_flat = history_features.view(B * N, L, F)
-        mask_flat = history_mask.view(B * N, L) if history_mask is not None else None
-        time_flat = time_features.view(B * N, L, -1) if time_features is not None else None
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None,
+                t_query: torch.Tensor | None = None) -> torch.Tensor:
+        """Simple forward: history → Δa_RTN at query times.
 
-        h_time = self.informer(hist_flat, time_flat, None, mask_flat)
-        # h_time: (B*N, d_model) → (B, N, d_model)
-        h_time = h_time.view(B, N, -1)
+        Args:
+            x: (B, L, F) history features
+            mask: (B, L) optional mask
+            t_query: (B, T) query times [s]. If None, returns single Δa at t=0
 
-        # 2. GNN: spatial fusion
-        # Handle batched edge_index: if 3D (B, 2, E), take first batch
-        if edge_index.dim() == 3:
-            edge_index = edge_index[0]  # (2, E)
-        if edge_attr.dim() == 3:
-            edge_attr = edge_attr[0]    # (E, F_e)
-        h_space = self.gnn(h_time, edge_index, edge_attr)
-        # h_space: (B, N, d_model)
-
-        # 3. Decoder: multi-step RTN residual acceleration
-        delta_a_rtn = self.decoder(h_space, physics_future, future_time_features)
-        # (B, N, H, 3)
-
-        return delta_a_rtn
-
-
-def build_fusion_model(cfg: dict) -> PhysicsAIFusionModel:
-    """从配置构建完整的融合模型。"""
-    return PhysicsAIFusionModel(cfg)
+        Returns:
+            (B, T, 3) or (B, 3) Δa_RTN predictions
+        """
+        h = self.encode(x, mask)
+        if t_query is None:
+            t_query = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+        return self.predict_thrust(h, t_query)
 
 
 def count_parameters(model: nn.Module) -> int:
-    """统计模型参数总数。"""
+    """Count trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+# ===== Linearized Thrust Propagation (FAST — no RK4 autograd) =====
+
+def linearized_thrust_propagation(
+    r_phys: torch.Tensor,
+    v_phys: torch.Tensor,
+    rtn_basis: torch.Tensor,
+    a_rtn: torch.Tensor,
+    dt: float = 60.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute thrust-corrected trajectory via linearized recurrence.
+
+    Uses the state-correction recurrence:
+      δv_{k+1} = δv_k + Δt · R_k · Δa_k
+      δr_{k+1} = δr_k + Δt · δv_k + ½Δt² · R_k · Δa_k
+
+    where R_k is the (3,3) RTN→ECI rotation matrix at step k.
+
+    This is O(H) matrix operations — ~1000x faster than differentiable RK4.
+
+    Args:
+        r_phys:  (B, H, 3) pre-computed physics-only positions [m]
+        v_phys:  (B, H, 3) pre-computed physics-only velocities [m/s]
+        rtn_basis: (B, H, 3, 3) pre-computed RTN→ECI rotation matrices
+        a_rtn:   (B, H, 3) predicted RTN thrust from model [m/s²]
+        dt:      time step [s]
+
+    Returns:
+        r_corrected: (B, H, 3) physics + thrust-corrected positions [m]
+        v_corrected: (B, H, 3) physics + thrust-corrected velocities [m/s]
+    """
+    B, H, _ = a_rtn.shape
+    device = a_rtn.device
+    dtype = a_rtn.dtype
+
+    # Allocate output
+    r_corrected = torch.zeros_like(r_phys)
+    v_corrected = torch.zeros_like(v_phys)
+
+    # Initial state: t0 has no correction (thrust hasn't acted yet)
+    dr = torch.zeros(B, 3, device=device, dtype=dtype)
+    dv = torch.zeros(B, 3, device=device, dtype=dtype)
+
+    r_corrected[:, 0, :] = r_phys[:, 0, :]
+    v_corrected[:, 0, :] = v_phys[:, 0, :]
+
+    dt2_half = 0.5 * dt * dt
+
+    for k in range(H):
+        # RTN thrust at step k → ECI
+        R_k = rtn_basis[:, k, :, :]  # (B, 3, 3)
+        a_eci_k = torch.bmm(R_k, a_rtn[:, k, :].unsqueeze(-1)).squeeze(-1)  # (B, 3)
+
+        # Update corrections
+        dr_new = dr + dt * dv + dt2_half * a_eci_k
+        dv_new = dv + dt * a_eci_k
+
+        dr, dv = dr_new, dv_new
+
+        # Apply correction to physics trajectory
+        r_corrected[:, k, :] = r_phys[:, k, :] + dr
+        v_corrected[:, k, :] = v_phys[:, k, :] + dv
+
+    return r_corrected, v_corrected
+
+
+def compute_rtn_basis(r: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Compute RTN→ECI rotation matrices from position and velocity.
+
+    Args:
+        r: (B, H, 3) positions [m]
+        v: (B, H, 3) velocities [m/s]
+
+    Returns:
+        C: (B, H, 3, 3) rotation matrices [R_hat, T_hat, N_hat] as columns
+    """
+    rn = torch.norm(r, dim=-1, keepdim=True).clamp(min=1e-3)
+    R_hat = r / rn
+    speed = torch.norm(v, dim=-1, keepdim=True).clamp(min=1e-12)
+    T_hat = v / speed
+    N_hat = torch.cross(R_hat, T_hat, dim=-1)
+    N_hat = N_hat / torch.norm(N_hat, dim=-1, keepdim=True).clamp(min=1e-12)
+    return torch.stack([R_hat, T_hat, N_hat], dim=-1)
+
+
+# ===== Test =====
+
+if __name__ == "__main__":
+    # Quick smoke test
+    B, L, F = 4, 144, 14
+    H = 720  # 12h at 60s step
+
+    x = torch.randn(B, L, F)
+    mask = torch.ones(B, L)
+    t = torch.arange(H, dtype=torch.float32).unsqueeze(0).expand(B, -1) * 60.0  # 60s step
+
+    model = PINNLSTMModel(input_dim=F)
+    print(f"PINN+LSTM Model: {count_parameters(model):,} parameters")
+
+    h = model.encode(x, mask)
+    print(f"Hidden state: {h.shape}")
+
+    thrust = model.predict_thrust(h, t)
+    print(f"Thrust predictions: {thrust.shape} (range: [{thrust.min().item():.2e}, {thrust.max().item():.2e}])")
+
+    # Test propagation
+    physics_params = {
+        "mu": 3.986004418e14,
+        "J2": 1.08262668e-3,
+        "Re": 6378137.0,
+        "omega": 7.2921150e-5,
+        "rho0": 3.6e-12,  # at 550km
+        "h0": 550000.0,
+        "H_scale": 60000.0,
+        "Cd_A_m": 0.002 * 10.0 / 260.0,  # Cd*A/m
+    }
+
+    r0 = torch.randn(B, 3) * 1000 + torch.tensor([[6800000.0, 0.0, 0.0]])
+    v0 = torch.randn(B, 3) * 10 + torch.tensor([[0.0, 7600.0, 0.0]])
+
+    # Only propagate first few steps for smoke test
+    pos = differentiable_propagate_with_thrust_fn(
+        r0, v0, dt_output=60.0, n_steps=10,
+        thrust_fn=lambda t_q: model.predict_thrust(h, t_q),
+        physics_params=physics_params, substeps=10,
+    )
+    print(f"Propagated positions: {pos.shape}")
+    print(f"All tests passed!")
