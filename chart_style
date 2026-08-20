@@ -1,0 +1,282 @@
+# -*- coding: utf-8 -*-
+"""
+统一图表样式模块
+================
+参照学术期刊标准，统一定义 matplotlib 全局参数、颜色方案和辅助绘图函数。
+所有图表（GUI 内嵌 + 独立导出）均导入此模块以保证风格一致。
+
+设计原则：
+  1. 白色背景，完整黑色边框（四边框）
+  2. 浅灰虚线网格，透明度 ~0.25
+  3. 无衬线中文字体（Microsoft YaHei），同级别文字字号统一
+  4. 图例统一放置在子图上方外侧
+  5. 标题与坐标轴间距统一（pad=12）
+  6. 300 DPI 高清输出
+"""
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.font_manager import FontProperties
+
+# ============================================================
+# 1. 颜色方案 — 学术出版物风格
+# ============================================================
+C_BLUE    = '#2166ac'   # 主蓝
+C_GREEN   = '#1b7837'   # 深绿
+C_RED     = '#b2182b'   # 深红
+C_ORANGE  = '#e08214'   # 橙色
+C_PURPLE  = '#762a83'   # 紫色
+C_GRAY    = '#999999'   # 中灰
+C_BLACK   = '#222222'   # 近黑
+C_TEAL    = '#2a9d8f'   # 青绿
+C_GOLD    = '#e6a817'   # 金黄
+C_MAGENTA = '#c85a9e'   # 品红
+
+# 顺序色板（用于热图等）
+SEQ_CMAP  = 'YlOrRd'
+DIV_CMAP  = 'RdBu_r'
+
+# 分类色板（用于多系列折线/柱状图）
+PALETTE = [C_BLUE, C_RED, C_GREEN, C_ORANGE, C_PURPLE, C_TEAL]
+
+# ============================================================
+# 2. 字体与字号层级
+# ============================================================
+FONT_FAMILY = ['Microsoft YaHei', 'SimHei', 'sans-serif']
+
+# 字号层级（pt）— 同级别严格统一
+FS_TITLE     = 14    # 子图标题
+FS_SUPTITLE  = 18    # 总标题
+FS_AXISLABEL = 12    # 坐标轴标签
+FS_TICK      = 10.5  # 刻度标签
+FS_LEGEND    = 10.5  # 图例文字
+FS_ANNOT     = 10    # 注释文字
+FS_SUBLABEL  = 13    # 子图编号 (a)(b)(c)(d)
+
+# ============================================================
+# 3. 全局 rcParams
+# ============================================================
+RCPARAMS = {
+    # 字体
+    'font.family':           FONT_FAMILY,
+    'font.size':             FS_TICK,
+    'axes.unicode_minus':    False,
+    # 字号层级
+    'axes.titlesize':        FS_TITLE,
+    'axes.labelsize':        FS_AXISLABEL,
+    'legend.fontsize':       FS_LEGEND,
+    'xtick.labelsize':       FS_TICK,
+    'ytick.labelsize':       FS_TICK,
+    # 背景
+    'figure.facecolor':      'white',
+    'axes.facecolor':        'white',
+    'savefig.facecolor':     'white',
+    # 边框 — 完整四边框
+    'axes.spines.top':       True,
+    'axes.spines.right':     True,
+    'axes.spines.bottom':    True,
+    'axes.spines.left':      True,
+    'axes.linewidth':        0.8,
+    # 网格 — 浅灰虚线
+    'axes.grid':             True,
+    'grid.alpha':            0.4,
+    'grid.linestyle':        '--',
+    'grid.linewidth':        0.6,
+    'grid.color':            '#bbbbbb',
+    # 刻度
+    'xtick.direction':       'in',
+    'ytick.direction':       'in',
+    'xtick.major.width':     0.6,
+    'ytick.major.width':     0.6,
+    'xtick.major.size':      4,
+    'ytick.major.size':      4,
+    # 线条
+    'lines.linewidth':       1.6,
+    'lines.markersize':      6,
+    # 图例
+    'legend.frameon':        True,
+    'legend.framealpha':     0.9,
+    'legend.edgecolor':      '#cccccc',
+    'legend.fancybox':       False,
+    'legend.borderpad':      0.4,
+    'legend.handlelength':   2.0,
+    # 保存
+    'savefig.dpi':           300,
+    'savefig.bbox':          'tight',
+    'savefig.pad_inches':    0.12,
+    'figure.dpi':            100,
+}
+
+def apply_style():
+    """应用全局统一样式。在导入后立即调用。"""
+    plt.rcParams.update(RCPARAMS)
+
+# ============================================================
+# 4. 辅助绘图函数
+# ============================================================
+
+def style_axis(ax, title=None, xlabel=None, ylabel=None,
+               title_pad=12, legend_loc='upper right'):
+    """
+    统一设置单个 Axes 的样式：
+      - 完整四边框
+      - 内向刻度
+      - 网格
+      - 标题与标签
+      - 图例位置
+    """
+    # 四边框
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+        spine.set_color('#333333')
+
+    # 刻度
+    ax.tick_params(axis='both', which='major', direction='in',
+                   top=True, right=True, width=0.6, length=4,
+                   labelsize=FS_TICK)
+
+    # 网格
+    ax.grid(True, linestyle='--', linewidth=0.6, alpha=0.4, color='#bbbbbb')
+
+    # 标题
+    if title:
+        ax.set_title(title, fontsize=FS_TITLE, fontweight='bold',
+                     pad=title_pad, loc='left', color=C_BLACK)
+
+    # 标签
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=FS_AXISLABEL, color=C_BLACK,
+                      labelpad=6)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=FS_AXISLABEL, color=C_BLACK,
+                      labelpad=6)
+
+    # 图例
+    if ax.get_legend_handles_labels()[1]:
+        leg = ax.legend(loc=legend_loc, fontsize=FS_LEGEND,
+                        framealpha=0.9, edgecolor='#cccccc',
+                        fancybox=False, borderpad=0.4)
+        if leg:
+            leg.get_frame().set_linewidth(0.5)
+
+
+def style_3d_axis(ax, title=None, xlabel=None, ylabel=None, zlabel=None,
+                  title_pad=12):
+    """统一设置 3D Axes 样式。"""
+    if title:
+        ax.set_title(title, fontsize=FS_TITLE, fontweight='bold',
+                     pad=title_pad, loc='left', color=C_BLACK)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=FS_AXISLABEL, labelpad=8,
+                      color=C_BLACK)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=FS_AXISLABEL, labelpad=8,
+                      color=C_BLACK)
+    if zlabel:
+        ax.set_zlabel(zlabel, fontsize=FS_AXISLABEL, labelpad=8,
+                      color=C_BLACK)
+    ax.tick_params(axis='both', which='major', labelsize=FS_TICK, pad=4)
+
+    # 3D 网格虚线
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis._axinfo['grid']['linestyle'] = '--'
+        axis._axinfo['grid']['linewidth'] = 0.4
+        axis._axinfo['grid']['color'] = '#cccccc'
+        axis._axinfo['grid']['alpha'] = 0.3
+        axis.pane.set_edgecolor('#333333')
+        axis.pane.set_linewidth(0.6)
+
+
+def add_subfig_label(ax, label, x=-0.08, y=1.02):
+    """
+    在子图左上角添加编号标签 (a)(b)(c)(d)。
+    使用 transAxes 坐标系，确保不受数据范围影响。
+    兼容 2D 与 3D 坐标轴。
+    """
+    text_kwargs = dict(fontsize=FS_SUBLABEL, fontweight='bold',
+                       va='bottom', ha='right', color=C_BLACK,
+                       transform=ax.transAxes)
+    if hasattr(ax, 'zaxis'):
+        # 3D 轴需要使用 text2D 放置 2D 文字
+        ax.text2D(x, y, f'({label})', **text_kwargs)
+    else:
+        ax.text(x, y, f'({label})', **text_kwargs)
+
+
+def style_colorbar(cbar, label=None):
+    """统一设置 colorbar 样式。"""
+    if label:
+        cbar.set_label(label, fontsize=FS_AXISLABEL, color=C_BLACK,
+                       labelpad=8)
+    cbar.ax.tick_params(labelsize=FS_TICK, width=0.5, length=3)
+    cbar.outline.set_linewidth(0.6)
+    cbar.outline.set_edgecolor('#333333')
+
+
+def style_table(ax, table, title=None):
+    """
+    统一设置 matplotlib table 样式。
+      - 表头深蓝底白字加粗
+      - 偶数行浅灰底
+      - 无内框线
+    """
+    if title:
+        ax.set_title(title, fontsize=FS_TITLE, fontweight='bold',
+                     pad=14, loc='center', color=C_BLACK)
+    ax.axis('off')
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(FS_TICK + 1)
+
+    n_rows = max(key[0] for key in table._cells.keys()) + 1
+    n_cols = max(key[1] for key in table._cells.keys()) + 1
+
+    # 缩放表格以填充坐标轴
+    table.scale(1, 1.8)
+
+    # 表头 — 深蓝底白字加粗
+    for j in range(n_cols):
+        cell = table[0, j]
+        cell.set_facecolor(C_BLUE)
+        cell.get_text().set_color('white')
+        cell.get_text().set_fontweight('bold')
+        cell.get_text().set_fontsize(FS_AXISLABEL)
+        cell.set_height(0.06)
+
+    # 数据行 — 隔行底色
+    for i in range(1, n_rows):
+        for j in range(n_cols):
+            cell = table[i, j]
+            if i % 2 == 0:
+                cell.set_facecolor('#f1f4f8')
+            else:
+                cell.set_facecolor('white')
+            cell.get_text().set_fontsize(FS_TICK + 1)
+            cell.get_text().set_fontweight('normal')
+            cell.get_text().set_color(C_BLACK)
+            cell.set_height(0.055)
+
+    # 去掉所有边框线
+    for cell in table.get_celld().values():
+        cell.set_linewidth(0)
+        cell.set_edgecolor('none')
+
+
+# ============================================================
+# 5. 便捷函数：创建统一风格的 Figure
+# ============================================================
+
+def create_figure(nrows=1, ncols=1, figsize=(8, 5), constrained=True):
+    """创建统一风格的 Figure 对象。"""
+    if constrained:
+        fig = plt.figure(figsize=figsize, layout='constrained')
+    else:
+        fig = plt.figure(figsize=figsize)
+        fig.subplots_adjust(left=0.08, right=0.96, top=0.92, bottom=0.10,
+                            wspace=0.25, hspace=0.30)
+    fig.set_facecolor('white')
+    return fig
+
+
+# 模块导入时自动应用样式
+apply_style()
