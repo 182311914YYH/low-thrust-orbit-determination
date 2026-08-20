@@ -1,13 +1,5 @@
-"""PINN+LSTM 模型评估 — 三张期刊标准图表.
-
-物理模型: NRLMSISE-00 + EGM96x20 + SRP + 三体引力 (configs/default.yaml)
-AI模型:  LSTM编码器 + 双头(回归+分类) + 物理残差特征
-训练:    degree-2自洽仿真数据（数据生成器与物理模型一致）
-
-Fig1: SMA预报精度 — 真实QK-1 OEM + 高精度物理传播 + AI修正
-Fig2: 机动检测 — 仿真验证(degree-2自洽) + 物理残差特征
-Fig3: 雷达OD融合 — 真实QK-1轨道 + 高精度物理 + AI机动先验
-"""
+# -*- coding: utf-8 -*-
+"""PINN+LSTM 模型评估 — 三张期刊标准图表."""
 import sys; sys.path.insert(0, '.')
 import numpy as np
 import matplotlib; matplotlib.use('Agg')
@@ -19,18 +11,7 @@ import torch, torch.nn as nn
 from torch.optim import AdamW
 from scipy.optimize import least_squares
 
-plt.rcParams.update({
-    'font.family': ['Microsoft YaHei', 'SimHei', 'sans-serif'],
-    'axes.unicode_minus': False,
-    'font.size': 9, 'axes.titlesize': 10, 'axes.labelsize': 9,
-    'legend.fontsize': 8, 'xtick.labelsize': 8, 'ytick.labelsize': 8,
-    'figure.facecolor': 'white', 'axes.facecolor': 'white',
-    'axes.grid': True, 'grid.alpha': 0.2, 'grid.linestyle': '--',
-    'grid.linewidth': 0.4, 'axes.spines.top': False, 'axes.spines.right': False,
-    'axes.linewidth': 0.6, 'xtick.major.width': 0.5, 'ytick.major.width': 0.5,
-    'lines.linewidth': 1.4, 'savefig.dpi': 300, 'savefig.bbox': 'tight',
-    'savefig.pad_inches': 0.08,
-})
+from chart_style import *
 
 out = Path("评估图表"); out.mkdir(parents=True, exist_ok=True)
 
@@ -45,6 +26,7 @@ cfg = load_config("系统配置/default.yaml")
 mu, Re = cfg["const"]["mu_earth"], cfg["const"]["radius_earth"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# ---------- 数据加载 ----------
 data = load_qk1_dataset("数据文件/QK1原始OEM数据"); N_all = len(data)
 nt = int(N_all * 0.15)
 train_data = data[:N_all - 2*nt]
@@ -53,8 +35,6 @@ train_segs = find_continuous_segments(train_data)
 test_segs = find_continuous_segments(test_data)
 train_s = build_samples_from_segments(train_segs, 144, 720, 60.0, 72)
 test_s  = build_samples_from_segments(test_segs, 144, 720, 60.0, 72)
-
-BLU, GRN, RED, ORG, GRY, BLK = '#2166ac', '#1b7837', '#b2182b', '#e08214', '#999999', '#222222'
 
 # ---------- Model ----------
 class Detector(nn.Module):
@@ -71,14 +51,8 @@ class Detector(nn.Module):
         h = self.enc.encode(x, m)
         return self.reg(h), self.cls(h)
 
-
 def load_or_train():
-    """训练或加载 AI 模型。
-
-    使用 degree-2 自洽仿真数据训练：数据生成器=物理模型=J2only，
-    保证物理残差特征纯净（R2>0.99）。推理时特征求取同样用degree-2，
-    但轨道传播用高精度cfg（fig1/fig3），AI修正叠加在高精度物理基线上。
-    """
+    """训练或加载 AI 模型"""
     cache = out / "model_final.pt"
     if cache.exists():
         m = Detector()
@@ -163,13 +137,11 @@ def load_or_train():
     torch.save(m.state_dict(), cache)
     return m.to(device), rs
 
-
 model, REG_SCALE = load_or_train()
 model.eval()
 
 # ---------- Build features for real QK-1 test set ----------
 def build_test_features(samples):
-    """构建物理残差特征 — 必须与训练时一致 (degree-2)"""
     c2 = load_config("系统配置/default.yaml")
     c2["model"]["truth"]["gravity_order"] = 2
     c2["model"]["truth"]["use_J2"] = True
@@ -198,12 +170,10 @@ def build_test_features(samples):
     F[np.isnan(F)] = 0; F[np.isinf(F)] = 0
     return torch.from_numpy(F).float()
 
-
 X_test = build_test_features(test_s)
 with torch.no_grad():
     da_pred_all, _ = model(X_test.to(device))
     da_pred_all = da_pred_all.cpu().numpy() * REG_SCALE
-
 
 # =====================================================================
 # FIGURE 1
@@ -217,7 +187,7 @@ def figure1():
                  .total_seconds() / 86400.0 + 2451545.0)
 
     all_rmse = []
-    all_snapshots = []  # (i, sma_ai, sma_oem, err_m, da)
+    all_snapshots = [] 
     for i in range(len(test_s["init_states"])):
         init_s = test_s["init_states"][i].copy()
         t0_s = test_s["t0"][i] - t0_ref
@@ -236,46 +206,53 @@ def figure1():
 
     all_rmse = np.array(all_rmse)
 
-    fig = plt.figure(figsize=(10, 4.8))
-    gs = GridSpec(1, 2, figure=fig, width_ratios=[1.3, 1], wspace=0.28)
+    fig = create_figure(figsize=(10, 4.8), constrained=True)
+    gs = GridSpec(1, 2, figure=fig, width_ratios=[1.3, 1])
 
-    # (a) SMA time series
     bi = int(np.argmin(all_rmse))
     sma_ai, sma_oem, err_b, da_b = all_snapshots[bi]
     t_h = np.arange(720) * 60.0 / 3600.0
     date_str = datetime.fromtimestamp(test_s["t0"][bi], tz=timezone.utc).strftime('%Y-%m-%d %H:%M')
 
+    # --- (a) 时间序列 + 双Y轴 ---
     ax_a = fig.add_subplot(gs[0, 0])
-    ax_a.plot(t_h, sma_oem, color=BLK, lw=2.2, label='精密星历')
-    ax_a.plot(t_h, sma_ai, color=BLU, lw=1.8, label='模型预报')
+    ax_a.plot(t_h, sma_oem, color=C_BLACK, lw=2.2, label='精密星历')
+    ax_a.plot(t_h, sma_ai, color=C_BLUE, lw=1.8, label='模型预报')
     ax2 = ax_a.twinx()
-    ax2.fill_between(t_h, -np.abs(err_b), np.abs(err_b), color=BLU, alpha=0.06)
-    ax2.set_ylabel('半长轴偏差 / m', fontsize=9, color=BLU)
-    ax2.tick_params(colors=BLU, labelsize=8)
-    ax_a.set_xlabel('预报时间 / h', fontsize=9)
-    ax_a.set_ylabel('半长轴 / km', fontsize=9)
-    ax_a.legend(loc='upper right', framealpha=0.85, fontsize=8)
-    ax_a.set_title(f'QK-1 {date_str}  模型预报 (NRLMSISE-00+EGM20+SRP+III)',
-                   fontsize=10, loc='left')
+    ax2.fill_between(t_h, -np.abs(err_b), np.abs(err_b),
+                     color=C_BLUE, alpha=0.06)
+    ax2.set_ylabel('半长轴偏差 / m', fontsize=FS_AXISLABEL,
+                   color=C_BLUE, labelpad=6)
+    ax2.tick_params(colors=C_BLUE, labelsize=FS_TICK, direction='in',
+                    width=0.6, length=4)
+    for sp in ax2.spines.values():
+        sp.set_visible(True); sp.set_linewidth(0.8); sp.set_color('#333333')
+    ax2.grid(False)
+    style_axis(ax_a, title=f'QK-1 {date_str}  模型预报',
+               xlabel='预报时间 / h', ylabel='半长轴 / km',
+               legend_loc='upper right')
+    add_subfig_label(ax_a, 'a')
 
-    # (b) Error histogram
+    # --- (b) 直方图 ---
     ax_b = fig.add_subplot(gs[0, 1])
-    ax_b.hist(all_rmse, bins=14, color=BLU, alpha=0.7, edgecolor='white', linewidth=0.4)
+    ax_b.hist(all_rmse, bins=14, color=C_BLUE, alpha=0.7,
+              edgecolor='white', linewidth=0.4)
     md_val = np.median(all_rmse)
     mn_val = all_rmse.mean()
-    ax_b.axvline(md_val, color=RED, lw=1.2, ls='--')
-    ax_b.axvline(mn_val, color=ORG, lw=1.2)
+    ax_b.axvline(md_val, color=C_RED, lw=1.2, ls='--')
+    ax_b.axvline(mn_val, color=C_ORANGE, lw=1.2)
     ymax = ax_b.get_ylim()[1]
-    ax_b.text(md_val * 1.02, ymax * 0.90, f'中位数 {md_val:.0f} m', fontsize=8, color=RED)
-    ax_b.text(mn_val * 1.02, ymax * 0.78, f'均值 {mn_val:.0f} m', fontsize=8, color=ORG)
-    ax_b.set_xlabel('半长轴均方根误差 / m', fontsize=9)
-    ax_b.set_ylabel('样本数量', fontsize=9)
+    ax_b.text(md_val * 1.02, ymax * 0.90, f'中位数 {md_val:.0f} m',
+              fontsize=FS_ANNOT, color=C_RED)
+    ax_b.text(mn_val * 1.02, ymax * 0.78, f'均值 {mn_val:.0f} m',
+              fontsize=FS_ANNOT, color=C_ORANGE)
+    style_axis(ax_b, xlabel='半长轴均方根误差 / m', ylabel='样本数量')
+    add_subfig_label(ax_b, 'b')
 
     fig.savefig(out / "fig1_sma.png", dpi=300)
     fig.savefig(out / "fig1_sma.pdf", dpi=300)
     plt.close()
     print(f"  完成: 半长轴中位误差 = {md_val:.0f} m")
-
 
 # =====================================================================
 # FIGURE 2
@@ -342,44 +319,51 @@ def figure2():
                    / max(np.sum((labs[:, a] - labs[:, a].mean()) ** 2), 1e-20), 0)
                for a in range(3)]
 
-    fig = plt.figure(figsize=(9.5, 7.8), layout='constrained')
-    gs = GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.32)
+    fig = create_figure(figsize=(9.5, 7.8), constrained=True)
+    gs = GridSpec(2, 2, figure=fig)
 
-    # (a) ROC
+    # --- (a) ROC 曲线 ---
     ax_a = fig.add_subplot(gs[0, 0])
-    ax_a.plot(fpr, tpr, color=BLU, lw=2.2, label=f'AUC = {roc_auc:.3f}')
-    ax_a.plot([0, 1], [0, 1], '--', color=GRY, lw=1, alpha=0.5)
-    ax_a.fill_between(fpr, tpr, alpha=0.06, color=BLU)
-    ax_a.set_xlabel('虚警率', fontsize=9); ax_a.set_ylabel('检测率', fontsize=9)
-    ax_a.legend(loc='lower right', framealpha=0.85)
+    ax_a.plot(fpr, tpr, color=C_BLUE, lw=2.2, label=f'AUC = {roc_auc:.3f}')
+    ax_a.plot([0, 1], [0, 1], '--', color=C_GRAY, lw=1, alpha=0.5,
+              label='随机基线')
+    ax_a.fill_between(fpr, tpr, alpha=0.06, color=C_BLUE)
+    style_axis(ax_a, xlabel='虚警率', ylabel='检测率',
+               legend_loc='lower right')
     ax_a.set_xlim(-0.02, 1.02); ax_a.set_ylim(-0.02, 1.02)
+    add_subfig_label(ax_a, 'a')
 
-    # (b) Confusion matrix
+    # --- (b) 混淆矩阵 ---
     ax_b = fig.add_subplot(gs[0, 1])
     im = ax_b.imshow(cm, cmap='Blues', aspect='auto', vmin=0)
     for i in range(2):
         for j in range(2):
             ax_b.text(j, i, str(cm[i, j]), ha='center', va='center',
-                      fontsize=22, fontweight='bold',
-                      color='white' if cm[i, j] > cm.max() / 2 else BLK)
-    ax_b.set_xticks([0, 1]); ax_b.set_xticklabels(['无推力', '有推力'], fontsize=9)
-    ax_b.set_yticks([0, 1]); ax_b.set_yticklabels(['无推力', '有推力'], fontsize=9)
-    ax_b.set_xlabel('预测类别', fontsize=9); ax_b.set_ylabel('真实类别', fontsize=9)
-    ax_b.set_title(f'准确率 = {acc * 100:.1f}%', fontsize=10, loc='left')
-    plt.colorbar(im, ax=ax_b, shrink=0.78)
+                      fontsize=FS_TITLE + 8, fontweight='bold',
+                      color='white' if cm[i, j] > cm.max() / 2 else C_BLACK)
+    ax_b.set_xticks([0, 1]); ax_b.set_xticklabels(['无推力', '有推力'])
+    ax_b.set_yticks([0, 1]); ax_b.set_yticklabels(['无推力', '有推力'])
+    style_axis(ax_b, title=f'准确率 = {acc * 100:.1f}%',
+               xlabel='预测类别', ylabel='真实类别')
+    ax_b.grid(False)
+    cbar = plt.colorbar(im, ax=ax_b, shrink=0.78)
+    style_colorbar(cbar)
+    add_subfig_label(ax_b, 'b')
 
-    # (c) R2 bars
+    # --- (c) R² 柱状图 ---
     ax_c = fig.add_subplot(gs[1, 0])
     bars = ax_c.bar(['径向 (R)', '沿迹 (T)', '法向 (N)'], r2_vals,
-                    color=[BLU, GRN, RED], width=0.5, edgecolor='white', linewidth=0.4)
+                    color=[C_BLUE, C_GREEN, C_RED], width=0.5,
+                    edgecolor='white', linewidth=0.4)
     for b, v in zip(bars, r2_vals):
         ax_c.text(b.get_x() + b.get_width() / 2, v + 0.03, f'{v:.3f}',
-                  ha='center', fontsize=12, fontweight='bold')
-    ax_c.set_ylabel('决定系数', fontsize=9)
+                  ha='center', fontsize=FS_LEGEND + 1.5,
+                  fontweight='bold', color=C_BLACK)
+    style_axis(ax_c, title='推力回归精度', ylabel='决定系数')
     ax_c.set_ylim(0, 1.15)
-    ax_c.set_title('推力回归精度', fontsize=10, loc='left')
+    add_subfig_label(ax_c, 'c')
 
-    # (d) Detection sensitivity
+    # --- (d) 敏感度曲线 ---
     ax_d = fig.add_subplot(gs[1, 1])
     mag_t = np.linalg.norm(labs, axis=1)
     bins = np.linspace(0, mag_t.max(), 10)
@@ -392,17 +376,17 @@ def figure2():
             sy.append(((y_bin[mask] == 1) & (y_true[mask] == 1)).sum()
                       / max((y_true[mask] == 1).sum(), 1))
     if sx:
-        ax_d.plot(sx, sy, 'o-', color=BLU, lw=2.5, ms=8, mfc='white', mew=2)
-    ax_d.axhline(y=0.9, color=RED, ls='--', lw=1.2, alpha=0.5)
-    ax_d.set_xlabel('推力幅值 / (m/s)', fontsize=9)
-    ax_d.set_ylabel('检测敏感度', fontsize=9)
+        ax_d.plot(sx, sy, 'o-', color=C_BLUE, lw=2.5, ms=8,
+                  mfc='white', mew=2)
+    ax_d.axhline(y=0.9, color=C_RED, ls='--', lw=1.2, alpha=0.5)
+    style_axis(ax_d, xlabel='推力幅值 / (m/s)', ylabel='检测敏感度')
     ax_d.set_ylim(-0.02, 1.08)
+    add_subfig_label(ax_d, 'd')
 
     fig.savefig(out / "fig2_detection.png", dpi=300)
     fig.savefig(out / "fig2_detection.pdf", dpi=300)
     plt.close()
     print(f"  完成: AUC={roc_auc:.3f}, R2=R={r2_vals[0]:.3f}/T={r2_vals[1]:.3f}/N={r2_vals[2]:.3f}")
-
 
 # =====================================================================
 # FIGURE 3
@@ -482,11 +466,9 @@ def figure3():
     bounds = (np.concatenate([[-np.inf] * 6, [-1e-4] * 3]),
               np.concatenate([[np.inf] * 6, [1e-3] * 3]))
 
-    # OD without maneuver
     r1 = least_squares(residual, params0.copy(), bounds=bounds,
                         method='trf', max_nfev=100, verbose=0)
 
-    # AI prior
     a_prior = np.array([0.0, true_da[1] * (1 + np.random.randn() * 0.2), 0.0])
     a_sigma = np.array([5e-4, 1.5e-5, 5e-4])
 
@@ -510,7 +492,6 @@ def figure3():
     rms_after  = np.sqrt((pos_err2 ** 2).mean())
     improvement = (rms_before - rms_after) / rms_before * 100.0
 
-    # RTN errors
     rtn1 = np.zeros((n_obs, 3)); rtn2 = np.zeros((n_obs, 3))
     for k in range(n_obs):
         for traj, rtn in [(traj1, rtn1), (traj2, rtn2)]:
@@ -521,83 +502,79 @@ def figure3():
             nh = np.cross(rh, th); nh /= np.linalg.norm(nh)
             rtn[k] = [np.dot(dr, rh), np.dot(dr, th), np.dot(dr, nh)]
 
-    # === Plot ===
-    fig = plt.figure(figsize=(9.5, 7.8), layout='constrained')
-    gs = GridSpec(2, 2, figure=fig, hspace=0.38, wspace=0.32)
+    fig = create_figure(figsize=(9.5, 7.8), constrained=True)
+    gs = GridSpec(2, 2, figure=fig)
 
-    # (a) Position error
+    # --- (a) 位置误差时间序列 ---
     ax_a = fig.add_subplot(gs[0, 0])
-    ax_a.plot(t_hours, pos_err1, color=RED, lw=1.5, alpha=0.85)
-    ax_a.plot(t_hours, pos_err2, color=GRN, lw=2.0)
-    ax_a.fill_between(t_hours, pos_err2, alpha=0.08, color=GRN)
-    ax_a.set_xlabel('时间 / h', fontsize=9)
-    ax_a.set_ylabel('位置误差 / m', fontsize=9)
-    ax_a.legend([f'无机动信息  RMS = {rms_before:.0f} m',
-                 f'AI机动融合  RMS = {rms_after:.0f} m ({improvement:+.0f}%)'],
-                fontsize=8, loc='upper right', framealpha=0.85)
-    ax_a.set_title('定轨精度对比', fontsize=10, loc='left')
+    ax_a.plot(t_hours, pos_err1, color=C_RED, lw=1.5, alpha=0.85,
+              label=f'无机动信息  RMS = {rms_before:.0f} m')
+    ax_a.plot(t_hours, pos_err2, color=C_GREEN, lw=2.0,
+              label=f'AI机动融合  RMS = {rms_after:.0f} m ({improvement:+.0f}%)')
+    ax_a.fill_between(t_hours, pos_err2, alpha=0.08, color=C_GREEN)
+    style_axis(ax_a, title='定轨精度对比',
+               xlabel='时间 / h', ylabel='位置误差 / m')
+    add_subfig_label(ax_a, 'a')
 
-    # (b) Thrust estimation
+    # --- (b) 推力参数估计柱状图 ---
     ax_b = fig.add_subplot(gs[0, 1])
     x_ticks = np.arange(3); bar_w = 0.18
-    ax_b.bar(x_ticks - 1.5 * bar_w, true_da, bar_w, color=BLK, alpha=0.85,
+    ax_b.bar(x_ticks - 1.5 * bar_w, true_da, bar_w, color=C_BLACK, alpha=0.85,
              label='真实推力')
-    ax_b.bar(x_ticks - 0.5 * bar_w, a_prior, bar_w, color=BLU, alpha=0.7,
+    ax_b.bar(x_ticks - 0.5 * bar_w, a_prior, bar_w, color=C_BLUE, alpha=0.7,
              label='AI预测先验')
-    ax_b.bar(x_ticks + 0.5 * bar_w, r1.x[6:9], bar_w, color=RED, alpha=0.7,
+    ax_b.bar(x_ticks + 0.5 * bar_w, r1.x[6:9], bar_w, color=C_RED, alpha=0.7,
              label='纯定轨')
-    ax_b.bar(x_ticks + 1.5 * bar_w, r2.x[6:9], bar_w, color=GRN, alpha=0.7,
+    ax_b.bar(x_ticks + 1.5 * bar_w, r2.x[6:9], bar_w, color=C_GREEN, alpha=0.7,
              label='AI融合定轨')
     ax_b.set_xticks(x_ticks)
-    ax_b.set_xticklabels(['径向', '沿迹', '法向'], fontsize=9)
-    ax_b.set_ylabel('加速度 / (m/s2)', fontsize=9)
-    ax_b.legend(fontsize=7, ncol=2, framealpha=0.85)
-    ax_b.set_title('推力参数估计', fontsize=10, loc='left')
+    ax_b.set_xticklabels(['径向', '沿迹', '法向'])
+    style_axis(ax_b, title='推力参数估计', ylabel='加速度 / (m/s²)')
+    leg_b = ax_b.legend(fontsize=FS_LEGEND, ncol=2, loc='upper right',
+                        framealpha=0.9, edgecolor='#cccccc',
+                        fancybox=False, borderpad=0.4)
+    leg_b.get_frame().set_linewidth(0.5)
+    add_subfig_label(ax_b, 'b')
 
-    # (c) RTN error bars
+    # --- (c) RTN 方向误差对比 ---
     ax_c = fig.add_subplot(gs[1, 0])
     labels_rtn = ['径向 (R)', '沿迹 (T)', '法向 (N)']
     for ai in range(3):
         r1v = np.sqrt((rtn1[:, ai] ** 2).mean())
         r2v = np.sqrt((rtn2[:, ai] ** 2).mean())
-        ax_c.bar(ai, r1v, 0.3, color=RED, alpha=0.7,
+        ax_c.bar(ai, r1v, 0.3, color=C_RED, alpha=0.7,
                  label='无机动信息' if ai == 0 else '')
-        ax_c.bar(ai + 0.3, r2v, 0.3, color=GRN, alpha=0.7,
+        ax_c.bar(ai + 0.3, r2v, 0.3, color=C_GREEN, alpha=0.7,
                  label='AI机动融合' if ai == 0 else '')
-        ax_c.text(ai, r1v * 1.03, f'{r1v:.0f}', ha='center', fontsize=7, color=RED)
-        ax_c.text(ai + 0.3, r2v * 1.03, f'{r2v:.0f}', ha='center', fontsize=7, color=GRN)
+        ax_c.text(ai, r1v * 1.03, f'{r1v:.0f}', ha='center',
+                  fontsize=FS_ANNOT, color=C_RED, fontweight='bold')
+        ax_c.text(ai + 0.3, r2v * 1.03, f'{r2v:.0f}', ha='center',
+                  fontsize=FS_ANNOT, color=C_GREEN, fontweight='bold')
     ax_c.set_xticks([0.15, 1.15, 2.15])
-    ax_c.set_xticklabels(labels_rtn, fontsize=9)
-    ax_c.set_ylabel('位置误差 RMS / m', fontsize=9)
-    ax_c.legend(fontsize=8, framealpha=0.85)
-    ax_c.set_title('RTN方向误差对比', fontsize=10, loc='left')
+    ax_c.set_xticklabels(labels_rtn)
+    style_axis(ax_c, title='RTN方向误差对比', ylabel='位置误差 RMS / m')
+    add_subfig_label(ax_c, 'c')
 
-    # (d) Post-fit residuals
+    # --- (d) 残差分布直方图 ---
     ax_d = fig.add_subplot(gs[1, 1])
     res1 = residual(r1.x); res2 = residual(r2.x)
-    ax_d.hist(res1, bins=35, alpha=0.5, color=RED, edgecolor='white',
+    ax_d.hist(res1, bins=35, alpha=0.5, color=C_RED, edgecolor='white',
               linewidth=0.3, label='无机动信息')
-    ax_d.hist(res2, bins=35, alpha=0.45, color=GRN, edgecolor='white',
+    ax_d.hist(res2, bins=35, alpha=0.45, color=C_GREEN, edgecolor='white',
               linewidth=0.3, label='AI机动融合')
-    ax_d.set_xlabel('加权残差', fontsize=9)
-    ax_d.set_ylabel('频次', fontsize=9)
-    ax_d.legend(fontsize=8, framealpha=0.85)
-    ax_d.set_title('定轨后残差分布', fontsize=10, loc='left')
+    style_axis(ax_d, title='定轨后残差分布',
+               xlabel='加权残差', ylabel='频次')
+    add_subfig_label(ax_d, 'd')
 
     fig.savefig(out / "fig3_pod.png", dpi=300)
     fig.savefig(out / "fig3_pod.pdf", dpi=300)
     plt.close()
     print(f"  完成: 位置误差改善 = {improvement:+.0f}%")
 
-
 # =====================================================================
 if __name__ == "__main__":
     print("=" * 50)
     print("  PINN+LSTM 模型评估")
     print("=" * 50)
-    figure1()
-    figure2()
-    figure3()
+    figure1(); figure2(); figure3()
     print(f"\n输出: {out}/")
-    for f in sorted(out.glob("fig[123]*.png")):
-        print(f"  {f.name}")
